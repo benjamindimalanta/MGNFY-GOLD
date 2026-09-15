@@ -1,12 +1,17 @@
 """Compare the two entry modes on the same weeks through MT5's real Strategy Tester.
 
 Full Mon-Fri weeks, the user's inputs from the base ini, $500 deposit (so the ~$53 margin floor of a
-$100 account doesn't cut weeks short). Only InpEntryMode differs between the two runs of each week.
+$100 account doesn't cut weeks short). Only InpEntryMode differs between the two runs of each week,
+plus any EXTRA_INPUTS applied to both.
 
 Environment:
-  WEEKS=4   the 4 diagnosis weeks (Aug 10, Aug 17, Aug 31, Sep 7) -- default
-  WEEKS=12  every full week with tick data, Jun 22 - Sep 11
-  TAG=...   suffix for the trades CSV and report names, so batches don't overwrite each other
+  WEEK_START=YYYY-MM-DD  first Monday of a custom range (with WEEK_COUNT, default 4)
+  WEEKS=4                the 4 diagnosis weeks (Aug 10, Aug 17, Aug 31, Sep 7) -- default
+  WEEKS=12               every full week Jun 22 - Sep 11
+  TAG=...                suffix for the trades CSV and report names, so batches don't overwrite each other
+  EXTRA_INPUTS="Name=value;Name2=value2"
+                         EA input overrides for this batch; replaces the base ini line or appends one.
+                         Check the tester log's "started with inputs" list to confirm they took effect.
 Arguments: optional mode names to run only those (breakout, swing).
 """
 import os
@@ -20,14 +25,24 @@ import pandas as pd
 import mt5_deep_parse as dp
 from mt5_week_check import BASE_INI, INI_DIR, run_test
 
-if os.environ.get("WEEKS", "4") == "12":
+if os.environ.get("WEEK_START"):
+    _first = datetime.strptime(os.environ["WEEK_START"], "%Y-%m-%d")
+    WEEKS = [_first + timedelta(weeks=i) for i in range(int(os.environ.get("WEEK_COUNT", "4")))]
+elif os.environ.get("WEEKS", "4") == "12":
     WEEKS = [datetime(2026, 6, 22) + timedelta(weeks=i) for i in range(12)]
 else:
     WEEKS = [datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 31), datetime(2026, 9, 7)]
 TAG = os.environ.get("TAG", "")
+EXTRA_INPUTS = [kv.strip() for kv in os.environ.get("EXTRA_INPUTS", "").split(";") if kv.strip()]
 DEPOSIT = 500.0
 MODES = {"breakout": 0, "swing": 1}
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
+
+
+def set_input(ini_text, name, value):
+    line = f"{name}={value}||{value}||0||{value}||N"
+    new, n = re.subn(rf"^{re.escape(name)}=.*$", line, ini_text, flags=re.M)
+    return new if n else ini_text.rstrip("\n") + "\n" + line + "\n"
 
 
 def make_ini(start, end, report, mode_value):
@@ -37,6 +52,9 @@ def make_ini(start, end, report, mode_value):
         s, n = re.subn(rf"^{key}=.*$", f"{key}={val}", s, flags=re.M)
         assert n == 1, f"{key} not found exactly once in base ini"
     s = s.rstrip("\n") + f"\nInpEntryMode={mode_value}||0||0||1||N\n"
+    for kv in EXTRA_INPUTS:
+        name, value = kv.split("=", 1)
+        s = set_input(s, name.strip(), value.strip())
     path = os.path.join(INI_DIR, report + ".ini")
     with open(path, "w", encoding="utf-8") as f:
         f.write(s)
@@ -76,6 +94,8 @@ def stats(t):
 
 def main():
     only = sys.argv[1:]
+    if EXTRA_INPUTS:
+        print(f"EXTRA_INPUTS: {EXTRA_INPUTS}", flush=True)
     frames = []
     for w in WEEKS:
         for mode, value in MODES.items():
