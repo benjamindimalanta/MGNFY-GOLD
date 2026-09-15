@@ -28,6 +28,25 @@ could visually cut through it.
   MACD and EMA indicators, and their sub-windows shrank the main chart below
   the panel's height. `OnInit()` now calls `TesterHideIndicators(true)` before
   creating indicator handles. Tester-only; no effect on live charts.
+- **MT5's own trade markers drawn over the HUD**: the terminal draws buy/sell
+  arrows and dotted entry-to-exit lines for every deal as chart objects
+  (names starting with `#`). They're created after the HUD, so full-resolution
+  tester captures showed them on top of its title and tabs. The EA now moves
+  those objects to the background layer whenever the chart's object count
+  changes: still visible on the chart, behind the panel.
+  Verified on the user's M5 inputs (2026-08-31 to 09-05, visual mode): the
+  EA's exit log counted 621 terminal trade markers, 0 still in the
+  foreground, and 0 leftover Entry/SL/TP lines; captures show a clean panel.
+- **Market session on the HUD** (requested by the user): a session line under
+  the title shows Asia (Tokyo), London, New York, the London + New York
+  overlap, the daily gold break, or weekend close, plus a countdown to the
+  next open/close. Computed in UTC with UK and US daylight-saving rules.
+  Live it uses the PC clock via `TimeGMT()`; in the Strategy Tester
+  `TimeGMT()` equals simulated server time, which is UTC on Exness (a broker
+  with a non-UTC server clock would show shifted sessions in the tester).
+  Verified in visual mode: "London + New York overlap / London closes in
+  3h 23m" and "Asia (Sydney), quiet / Tokyo opens in 0h 09m" match
+  September UTC session times.
 - Dark, high-contrast, gold-accent theme, replacing a plain white panel
   that didn't match the file's own long-standing "dark-themed HUD"
   description.

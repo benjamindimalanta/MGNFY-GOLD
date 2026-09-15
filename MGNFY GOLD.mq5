@@ -170,7 +170,7 @@ bool     g_calcIsBuy   = true; // risk-calculator direction toggle
 int HUD_PanelX = 10;
 int HUD_PanelY = 75;   // below the terminal's own toolbar
 int HUD_PanelW = 300;
-int HUD_PanelH = 430; // fits the taller Stats tab content (computed layout ends ~400px down) plus margin
+int HUD_PanelH = 460; // fits the taller Stats tab content plus the session lines, with margin
 
 string StatsGlobalName()
 {
@@ -366,6 +366,26 @@ void CleanupOldVisuals(int posDir)
   string tradeLines[] = {"Entry", "SL", "TP1", "TP2", "TP3"};
   for(int i = 0; i < ArraySize(tradeLines); i++)
     if(ObjectFind(0, tradeLines[i]) != -1) ObjectDelete(0, tradeLines[i]);
+}
+
+// MT5 draws its own marker for every deal (buy/sell arrows and the dotted line joining entry to
+// exit) as chart objects whose names start with "#". They are created after the HUD, so they were
+// drawn on top of it. Moving them to the background layer keeps them on the chart but behind the
+// panel. Rescans only when the chart's object count changes, so it is cheap to call every tick.
+int g_lastChartObjectCount = -1;
+
+void SendTerminalTradeMarkersBack()
+{
+  int total = ObjectsTotal(0, -1, -1);
+  if(total == g_lastChartObjectCount) return;
+  g_lastChartObjectCount = total;
+  for(int i = total - 1; i >= 0; --i)
+  {
+    string obj = ObjectName(0, i, -1, -1);
+    if(StringGetCharacter(obj, 0) != '#') continue;
+    if(ObjectGetInteger(0, obj, OBJPROP_BACK) != 0) continue;
+    ObjectSetInteger(0, obj, OBJPROP_BACK, (long)true);
+  }
 }
 
 // Builds before v1.13 named these lines "TP1_<bartime>" etc. and never removed them, so a chart
@@ -731,7 +751,9 @@ void EnsureHUD()
 
   int y = HUD_PanelY + 12;
   HUD_Label(HUD_PREFIX + "TITLE", innerX, y, "MGNFY GOLD", HUD_HEADER, 15, true); y += 24;
-  HUD_Label(HUD_PREFIX + "SUB", innerX, y, "", HUD_SUBTEXT, 9, false); y += 22;
+  HUD_Label(HUD_PREFIX + "SUB", innerX, y, "", HUD_SUBTEXT, 9, false); y += 18;
+  HUD_Label(HUD_PREFIX + "SESS", innerX, y, "", HUD_TEXT, 10, true); y += 16;
+  HUD_Label(HUD_PREFIX + "SESSNEXT", innerX, y, "", HUD_SUBTEXT, 8, false); y += 18;
 
   // Tab buttons
   int tabW = (innerW - 6) / 2;
@@ -839,6 +861,95 @@ void ApplyHUDTabVisibility()
   ObjectSetInteger(0, HUD_PREFIX + "TAB1", OBJPROP_COLOR,   (long)(showStats ? HUD_TABFG_OFF : HUD_TABFG_ON));
 }
 
+//---------- market session (Tokyo / London / New York), computed in UTC with UK and US daylight saving ----------
+// Live: TimeGMT() comes from the PC clock. Strategy Tester: TimeGMT() equals the simulated server time,
+// which is UTC on Exness -- on a broker whose server clock isn't UTC the tester display would be shifted.
+datetime HUD_UTC(int y, int m, int d, int h, int mi)
+{
+  MqlDateTime s;
+  ZeroMemory(s);
+  s.year = y; s.mon = m; s.day = d; s.hour = h; s.min = mi;
+  return StructToTime(s);
+}
+
+// Day of month of the nth Sunday (nth >= 1), or of the last Sunday when nth <= 0.
+int HUD_SundayOfMonth(int y, int m, int nth)
+{
+  MqlDateTime s;
+  if(nth > 0)
+  {
+    TimeToStruct(HUD_UTC(y, m, 1, 0, 0), s);
+    return 1 + (7 - s.day_of_week) % 7 + 7 * (nth - 1);
+  }
+  datetime lastDay = HUD_UTC(m == 12 ? y + 1 : y, m == 12 ? 1 : m + 1, 1, 0, 0) - 86400;
+  TimeToStruct(lastDay, s);
+  return s.day - s.day_of_week;
+}
+
+bool HUD_UKSummer(datetime utc)   // last Sunday of March 01:00 UTC -> last Sunday of October 01:00 UTC
+{
+  MqlDateTime s;
+  TimeToStruct(utc, s);
+  return utc >= HUD_UTC(s.year, 3, HUD_SundayOfMonth(s.year, 3, 0), 1, 0)
+      && utc <  HUD_UTC(s.year, 10, HUD_SundayOfMonth(s.year, 10, 0), 1, 0);
+}
+
+bool HUD_USSummer(datetime utc)   // second Sunday of March 02:00 local -> first Sunday of November 02:00 local
+{
+  MqlDateTime s;
+  TimeToStruct(utc, s);
+  return utc >= HUD_UTC(s.year, 3, HUD_SundayOfMonth(s.year, 3, 2), 7, 0)
+      && utc <  HUD_UTC(s.year, 11, HUD_SundayOfMonth(s.year, 11, 1), 6, 0);
+}
+
+void UpdateSessionLabels()
+{
+  datetime utc = TimeGMT();
+  MqlDateTime s;
+  TimeToStruct(utc, s);
+  int now = s.hour * 60 + s.min;
+  int ukShift = HUD_UKSummer(utc) ? 60 : 0;
+  int usShift = HUD_USSummer(utc) ? 240 : 300;
+  int tkOpen = 0, tkClose = 9 * 60;                                // Tokyo 09:00-18:00 JST, no DST
+  int lonOpen = 8 * 60 - ukShift, lonClose = 17 * 60 - ukShift;    // London 08:00-17:00 local
+  int nyOpen = 8 * 60 + usShift, nyClose = 17 * 60 + usShift;      // New York 08:00-17:00 local
+  int breakEnd = nyClose + 60;                                     // gold pauses NY 17:00-18:00
+
+  bool weekend = (s.day_of_week == 6) || (s.day_of_week == 5 && now >= nyClose) || (s.day_of_week == 0 && now < breakEnd);
+  bool london = (now >= lonOpen && now < lonClose);
+  bool newyork = (now >= nyOpen && now < nyClose);
+  bool tokyo = (now >= tkOpen && now < tkClose);
+
+  string name;
+  color clr;
+  if(weekend)                                { name = "Market closed (weekend)";   clr = HUD_RED; }
+  else if(now >= nyClose && now < breakEnd)  { name = "Daily break";               clr = HUD_SUBTEXT; }
+  else if(london && newyork)                 { name = "London + New York overlap"; clr = HUD_HEADER; }
+  else if(london)                            { name = tokyo ? "Tokyo + London" : "London"; clr = C'90,160,230'; }
+  else if(newyork)                           { name = "New York";                  clr = HUD_GREEN; }
+  else if(tokyo)                             { name = "Asia (Tokyo)";              clr = HUD_TEXT; }
+  else                                       { name = "Asia (Sydney), quiet";      clr = HUD_SUBTEXT; }
+  ObjectSetString(0, HUD_PREFIX + "SESS", OBJPROP_TEXT, "Session: " + name);
+  ObjectSetInteger(0, HUD_PREFIX + "SESS", OBJPROP_COLOR, (long)clr);
+
+  string next = " ";
+  if(!weekend)
+  {
+    int    times[] = {tkClose, lonOpen, lonClose, nyOpen, nyClose, breakEnd, 1440};
+    string names[] = {"Tokyo closes", "London opens", "London closes", "New York opens",
+                      "New York closes", "Daily break ends", "Tokyo opens"};
+    int best = -1;
+    for(int i = 0; i < ArraySize(times); i++)
+      if(times[i] > now && (best < 0 || times[i] < times[best])) best = i;
+    if(best >= 0)
+    {
+      int mins = times[best] - now;
+      next = StringFormat("%s in %dh %02dm", names[best], mins / 60, mins % 60);
+    }
+  }
+  ObjectSetString(0, HUD_PREFIX + "SESSNEXT", OBJPROP_TEXT, next);
+}
+
 //========================================= UpdateHUD =========================================
 // Called every OnTick(); only touches dynamic TEXT/color (never edit-box text, so typing in the
 // risk calculator is never stomped) -- cheap enough to run unconditionally.
@@ -848,6 +959,7 @@ void UpdateHUD()
 
   string sub = StringFormat("%s  |  %s", InpSymbol, EnumToString((ENUM_TIMEFRAMES)Period()));
   ObjectSetString(0, HUD_PREFIX + "SUB", OBJPROP_TEXT, sub);
+  UpdateSessionLabels();
 
   if(g_hudTab == 0) UpdateStatsTab();
   else              UpdateCalcTab();
@@ -1060,6 +1172,7 @@ void OnTick()
   if(Symbol() != InpSymbol) return;
   if(!EnsureHandles()) return;
   UpdateHUD();
+  SendTerminalTradeMarkersBack();
 
   // gate logic to new bar for signal generation
   bool newBar = IsNewBar();
@@ -1536,8 +1649,16 @@ void OnDeinit(const int reason)
   if(hEMALow != INVALID_HANDLE)   { IndicatorRelease(hEMALow); hEMALow = INVALID_HANDLE; }
   if(hTrendEMA != INVALID_HANDLE) { IndicatorRelease(hTrendEMA); hTrendEMA = INVALID_HANDLE; }
   
-  PrintFormat("Deinit: %d horizontal-line objects on chart (expected at most 5: Entry/SL/TP1-3)",
-              ObjectsTotal(0, -1, OBJ_HLINE));
+  int markers = 0, markersFront = 0;
+  for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; --i)
+  {
+    string obj = ObjectName(0, i, -1, -1);
+    if(StringGetCharacter(obj, 0) != '#') continue;
+    markers++;
+    if(ObjectGetInteger(0, obj, OBJPROP_BACK) == 0) markersFront++;
+  }
+  PrintFormat("Deinit: %d horizontal-line objects on chart (expected at most 5: Entry/SL/TP1-3); %d terminal trade markers, %d still in foreground",
+              ObjectsTotal(0, -1, OBJ_HLINE), markers, markersFront);
 
   // Cleanup HUD objects -- every HUD object uses this prefix, so one call catches all of them
   // (including anything a future edit adds, without needing to keep this list in sync by hand).
