@@ -2,6 +2,30 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.13] - 2026-09-15
+Full HUD rewrite, requested after the user found the previous panel "ugly
+and not very informative" and pointed out its Entry/SL/TP price lines
+could visually cut through it.
+
+- **Tabbed panel**: STATS and RISK CALCULATOR tabs (click to switch)
+  instead of one static block.
+- **Stats tab** now surfaces balance, equity, floating P/L, realized P/L,
+  win rate, win/loss counts, profit factor, max drawdown, and the current
+  open position's direction/entry/SL/TP1-TP2 status — profit factor and
+  max drawdown didn't exist anywhere in the EA before this.
+- **Risk Calculator tab** (new): editable entry price / lot size / TP
+  price / SL price; computes real $ gain at TP and $ loss at SL via the
+  broker's own `OrderCalcProfit()` (not hand-rolled pip math), plus the
+  resulting risk:reward ratio.
+- **Root cause of "blocked by the chart" fixed**: every HUD object now
+  gets an explicit z-order above the EA's own Entry/SL/TP price lines
+  (`OBJ_HLINE`, price-anchored, span the full chart width) — at whatever
+  y-pixel those lines land on screen they could previously render on top
+  of the panel and cut through it. Not a color/transparency issue.
+- Dark, high-contrast, gold-accent theme, replacing a plain white panel
+  that didn't match the file's own long-standing "dark-themed HUD"
+  description.
+
 ## [1.12] - 2026-09-15
 Backtested against 2 years of real XAUUSDm broker data before shipping —
 full trace of every test in `JOURNAL.md`.

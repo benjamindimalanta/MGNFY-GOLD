@@ -21,15 +21,36 @@
 //|     with stairstep cuts winners short; 1.5x gave the best        |
 //|     result of the values tried).                                 |
 //+------------------------------------------------------------------+
+//| v1.13 (2026-09-15) changes:                                      |
+//|  1. Full HUD rewrite: tabbed panel (STATS / RISK CALCULATOR)      |
+//|     instead of one static block. Stats tab now shows balance,     |
+//|     equity, floating & realized P/L, win rate, win/loss counts,   |
+//|     profit factor, max drawdown, and the currently open           |
+//|     position's direction/entry/SL/TP1-TP2 status -- none of that  |
+//|     existed before except win/loss counts and floating P/L.       |
+//|  2. Risk Calculator tab: editable entry price / lot size / TP     |
+//|     price / SL price, computed via the broker's own               |
+//|     OrderCalcProfit() (not hand-rolled pip math), showing $ gain  |
+//|     at TP, $ loss at SL, and the resulting risk:reward ratio.     |
+//|  3. Dark, high-contrast, gold-accent theme (previous panel was a  |
+//|     plain white box, which the file's own #property description  |
+//|     had claimed was "dark-themed" without actually being so).     |
+//|  4. Every HUD object now gets an explicit high z-order so it      |
+//|     always renders above the EA's own Entry/SL/TP price lines     |
+//|     (OBJ_HLINE) -- those are price-anchored and span the full     |
+//|     chart width, so at whatever y-pixel their price lands on      |
+//|     screen they could previously render on top of the             |
+//|     screen-anchored HUD panel and visually cut through it.        |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.12"
-#property description "ATR Regime Breakouts with EMA midline and ATR bands. Enhanced professional HUD display."
+#property version   "1.13"
+#property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
 #property description "Management: optional ATR trailing; spread/margin/session filters."
 #property description "Trend filter: higher‑timeframe EMA (+ optional slope)."
-#property description "HUD: Professional dark-themed HUD with system info, trading params, and color-coded P/L."
+#property description "HUD: dark gold-accent tabbed panel -- Stats (balance/equity/P&L/win-rate/PF/drawdown/open position) and a Risk Calculator (editable entry/lot/TP/SL, computed $ gain/loss and R:R)."
 #property description "Optional small-account mode: partial capture + BE buffer."
 #include <Trade/Trade.mqh>
 CTrade Trade;
@@ -116,22 +137,43 @@ int    prevTrend = 0;     // -1, 1; 0 means uninitialized
 bool   tp1Hit = false;
 bool   tp2Hit = false;
 ulong  lastTicket = 0;
-string kStatsBgName      = "MSB_OB_STATS_BG";
-string kStatsProfitName  = "MSB_OB_STATS_PROFIT";
-string kStatsBalanceName = "MSB_OB_STATS_BAL";
-string kStatsPLName      = "MSB_OB_STATS_PL";
-// Enhanced HUD elements
-string kHUDTitleName     = "MSB_OB_HUD_TITLE";
-string kHUDSystemName    = "MSB_OB_HUD_SYSTEM";
-string kHUDParamsName    = "MSB_OB_HUD_PARAMS";
-string kHUDWinTradesName = "MSB_OB_HUD_WIN_TRADES";
-string kHUDLossTradesName = "MSB_OB_HUD_LOSS_TRADES";
-string kHUDDrawdownName  = "MSB_OB_HUD_DRAWDOWN";
-string kHUDSeparator1Name = "MSB_OB_HUD_SEP1";  // Visual separator after header
-string kHUDSeparator2Name = "MSB_OB_HUD_SEP2";  // Visual separator after params
 datetime g_statsStart    = 0;
 
 bool   smallProfitTaken = false; // per-trade flag for small-account partial capture
+
+//-------------------- HUD v2 (tabbed panel: Stats / Risk Calculator) ---------------------
+// 2026-09-15: full HUD rewrite. Every object below uses the HUD_PREFIX naming convention so
+// OnDeinit can clean up with a single ObjectsDeleteAll(0, HUD_PREFIX) instead of a hand-kept
+// list, and every object gets HUD_Z as its z-order so the panel always renders ABOVE the EA's
+// own Entry/SL/TP price lines (OBJ_HLINE, drawn by DrawLine() below -- those are price-anchored
+// and span the full chart width, so at whatever y-pixel their price lands on screen they were
+// previously able to render on top of the screen-anchored HUD panel and cut through it, which is
+// what "blocked by the chart" was -- not a transparency/color problem, a z-order one).
+#define HUD_PREFIX "MSB_HUD_"
+#define HUD_Z      500
+int      g_hudTab      = 0;    // 0 = Stats tab, 1 = Risk Calculator tab
+bool     g_hudBuilt    = false;
+bool     g_calcIsBuy   = true; // risk-calculator direction toggle
+
+// Dark, high-contrast, opaque theme (gold accent -- matches the product name) so the panel reads
+// clearly regardless of what candles/colors are behind it.
+#define HUD_BG        C'16,18,23'
+#define HUD_BORDER    C'201,162,39'
+#define HUD_HEADER    C'230,196,90'
+#define HUD_TEXT      C'225,228,232'
+#define HUD_SUBTEXT   C'140,146,155'
+#define HUD_GREEN     C'55,199,120'
+#define HUD_RED       C'224,84,84'
+#define HUD_TABBG_OFF C'32,36,44'
+#define HUD_TABBG_ON  C'201,162,39'
+#define HUD_TABFG_OFF C'160,166,175'
+#define HUD_TABFG_ON  C'16,18,23'
+#define HUD_FIELDBG   C'26,29,36'
+
+int HUD_PanelX = 10;
+int HUD_PanelY = 75;   // below the terminal's own toolbar
+int HUD_PanelW = 300;
+int HUD_PanelH = 430; // fits the taller Stats tab content (computed layout ends ~400px down) plus margin
 
 string StatsGlobalName()
 {
@@ -505,287 +547,407 @@ double GetAccountHistoryProfitAll()
   return total;
 }
 
-void EnsureStatsLabel()
+//---------- small object-creation helpers (every HUD object: HUD_Z z-order, foreground, locked) ----------
+void HUD_ApplyCommon(string name)
 {
-  if(ObjectFind(0, "MSB_OB_STATS") != -1) ObjectDelete(0, "MSB_OB_STATS");
-  // Background rectangle
-  if(ObjectFind(0, kStatsBgName) == -1)
-  {
-    ObjectCreate(0, kStatsBgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  // Professional dark theme HUD panel
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_XDISTANCE, (long)10);
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_YDISTANCE, (long)75); // below toolbar
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_XSIZE, (long)330);   // Fixed professional size - NOT resizable
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_YSIZE, (long)320);    // Fixed professional height - adjusted for grouped layout
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_COLOR, (long)clrBlack); // black border for definition (thick border)
-  #ifdef OBJPROP_BGCOLOR
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_BGCOLOR, (long)clrWhite); // WHITE background like example image
-  #endif
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_BACK, (long)false);
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_SELECTABLE, (long)false); // NOT selectable/resizable - LOCKED
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_HIDDEN, (long)false); // NOT hidden
-  ObjectSetInteger(0, kStatsBgName, OBJPROP_ZORDER, (long)0); // Lock Z-order
-
-  // Calculate center: panel starts at 10, width is 330, so center = 10 + 165 = 175
-  int panelCenterX = 10 + 165; // = 175
-  int panelTopY = 75; // Top of panel
-  int sidePadding = 15; // 15px padding on all sides
-  int topBottomPadding = sidePadding; // 15px padding top and bottom
-  int separatorSpacing = 12; // Spacing between separators and text (was too close)
-  int groupSpacing = 20; // Spacing between sections
-
-  // ZONE 1: HEADER - EA Name + Total P/L (with 15px top padding)
-  // Title label (LARGE, BOLD) - CENTERED - Professional styling
-  if(ObjectFind(0, kHUDTitleName) == -1)
-  {
-    ObjectCreate(0, kHUDTitleName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_YDISTANCE, (long)(panelTopY + topBottomPadding)); // 15px from top
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_FONTSIZE, (long)17);
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kHUDTitleName, OBJPROP_FONT, "Arial Black");
-  ObjectSetInteger(0, kHUDTitleName, OBJPROP_COLOR, (long)clrBlack);
-
-  // Profit label (LARGE, BOLD, will be color-coded) - Main metric - CENTERED
-  if(ObjectFind(0, kStatsProfitName) == -1)
-  {
-    ObjectCreate(0, kStatsProfitName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_YDISTANCE, (long)(panelTopY + topBottomPadding + 25));
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_FONTSIZE, (long)13);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kStatsProfitName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_COLOR, (long)clrBlack); // will be overridden by color coding
-
-  // ZONE 2: TRADE PARAMETERS - Smaller font, grouped (with spacing after separator)
-  // System info label (smaller text) - CENTERED - Grouped layout
-  if(ObjectFind(0, kHUDSystemName) == -1)
-  {
-    ObjectCreate(0, kHUDSystemName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_YDISTANCE, (long)(panelTopY + topBottomPadding + 25 + separatorSpacing + separatorSpacing)); // spacing after separator 1
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_FONTSIZE, (long)9);
-  ObjectSetString(0,  kHUDSystemName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kHUDSystemName, OBJPROP_COLOR, (long)clrDimGray); // gray for secondary info
-
-  // Trading params label (smaller text) - CENTERED - Grouped layout
-  if(ObjectFind(0, kHUDParamsName) == -1)
-  {
-    ObjectCreate(0, kHUDParamsName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_YDISTANCE, (long)(panelTopY + topBottomPadding + 25 + separatorSpacing + separatorSpacing + 13)); // spacing after separator 1 + line spacing
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_FONTSIZE, (long)9);
-  ObjectSetString(0,  kHUDParamsName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kHUDParamsName, OBJPROP_COLOR, (long)clrDimGray); // gray for secondary info
-  
-  // Calculate separator 2 Y position: after params line + spacing (needed before Performance Metrics section)
-  int separator2Y = panelTopY + topBottomPadding + 25 + separatorSpacing + separatorSpacing + 13 + separatorSpacing;
-  
-  // ZONE 3: PERFORMANCE METRICS - Color-coded and grouped (with spacing after separator 2)
-  // Win Trades label (COLORED - green) - CENTERED - Grouped layout
-  if(ObjectFind(0, kHUDWinTradesName) == -1)
-  {
-    ObjectCreate(0, kHUDWinTradesName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_YDISTANCE, (long)(separator2Y + separatorSpacing)); // spacing after separator 2
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_FONTSIZE, (long)11);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kHUDWinTradesName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kHUDWinTradesName, OBJPROP_COLOR, (long)clrDarkGreen);
-  
-  // Loss Trades label (COLORED - red) - CENTERED - Grouped layout
-  if(ObjectFind(0, kHUDLossTradesName) == -1)
-  {
-    ObjectCreate(0, kHUDLossTradesName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_YDISTANCE, (long)(separator2Y + separatorSpacing + 17)); // after separator 2 + line spacing
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_FONTSIZE, (long)11);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kHUDLossTradesName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kHUDLossTradesName, OBJPROP_COLOR, (long)clrDarkRed);
-  
-  // Drawdown label - CENTERED - Grouped layout
-  if(ObjectFind(0, kHUDDrawdownName) == -1)
-  {
-    ObjectCreate(0, kHUDDrawdownName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_YDISTANCE, (long)(separator2Y + separatorSpacing + 34)); // after separator 2 + 2 line spacings
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_FONTSIZE, (long)11);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kHUDDrawdownName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_COLOR, (long)clrBlack); // will be color-coded
-  
-  // Balance label - CENTERED - Grouped layout
-  if(ObjectFind(0, kStatsBalanceName) == -1)
-  {
-    ObjectCreate(0, kStatsBalanceName, OBJ_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_YDISTANCE, (long)(separator2Y + separatorSpacing + 51)); // after separator 2 + 3 line spacings
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_FONTSIZE, (long)11);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kStatsBalanceName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kStatsBalanceName, OBJPROP_COLOR, (long)clrBlack);
-  
-  // Total PL label (will be color-coded) - CENTERED - Grouped layout
-  if(ObjectFind(0, kStatsPLName) == -1)
-    ObjectCreate(0, kStatsPLName, OBJ_LABEL, 0, 0, 0);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_XDISTANCE, (long)panelCenterX);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_YDISTANCE, (long)(separator2Y + separatorSpacing + 68)); // after separator 2 + 4 line spacings
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_ANCHOR, (long)ANCHOR_CENTER);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_SELECTABLE, (long)false);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_FONTSIZE, (long)11);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_BOLD, (long)true);
-  #endif
-  ObjectSetString(0,  kStatsPLName, OBJPROP_FONT, "Arial");
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_COLOR, (long)clrBlack);
-  
-  // Add visual separator lines between sections for better visual flow
-  // Separator 1: Between Header and Trade Parameters (with spacing above and below)
-  if(ObjectFind(0, kHUDSeparator1Name) == -1)
-  {
-    ObjectCreate(0, kHUDSeparator1Name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_XDISTANCE, (long)(10 + sidePadding)); // 15px left padding
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_YDISTANCE, (long)(panelTopY + topBottomPadding + 25 + separatorSpacing)); // spacing after Total P/L
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_XSIZE, (long)(330 - sidePadding * 2)); // width accounting for 15px on each side
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_YSIZE, (long)2); // height
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_COLOR, (long)clrSilver); // light gray line
-  #ifdef OBJPROP_BGCOLOR
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_BGCOLOR, (long)clrSilver); // light gray background
-  #endif
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_BACK, (long)false);
-  ObjectSetInteger(0, kHUDSeparator1Name, OBJPROP_SELECTABLE, (long)false);
-  
-  // Separator 2: Between Trade Parameters and Performance Metrics (with spacing above and below)
-  // Note: separator2Y is already calculated above
-  if(ObjectFind(0, kHUDSeparator2Name) == -1)
-  {
-    ObjectCreate(0, kHUDSeparator2Name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-  }
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_XDISTANCE, (long)(10 + sidePadding)); // 15px left padding
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_YDISTANCE, (long)separator2Y); // spacing after params line
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_XSIZE, (long)(330 - sidePadding * 2)); // width accounting for 15px on each side
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_YSIZE, (long)2); // height
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_COLOR, (long)clrSilver); // light gray line
-  #ifdef OBJPROP_BGCOLOR
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_BGCOLOR, (long)clrSilver); // light gray background
-  #endif
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_BACK, (long)false);
-  ObjectSetInteger(0, kHUDSeparator2Name, OBJPROP_SELECTABLE, (long)false);
+  ObjectSetInteger(0, name, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
+  ObjectSetInteger(0, name, OBJPROP_BACK, (long)false);       // foreground: draws above candles/indicators
+  ObjectSetInteger(0, name, OBJPROP_ZORDER, (long)HUD_Z);     // draws above the EA's own Entry/SL/TP lines too
+  ObjectSetInteger(0, name, OBJPROP_HIDDEN, (long)true);      // keep it out of the Object List, not off-chart
 }
 
-void UpdateStatsLabel()
+void HUD_Rect(string name, int x, int y, int w, int h, color bg, color border)
 {
-  EnsureStatsLabel();
-  double realized = GetEARealizedProfit();
-  double floating  = GetEAFloatingProfit();
-  double totalProfit = realized + floating;
-  double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-  double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  if(ObjectFind(0, name) == -1) ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+  HUD_ApplyCommon(name);
+  ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (long)x);
+  ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
+  ObjectSetInteger(0, name, OBJPROP_XSIZE, (long)w);
+  ObjectSetInteger(0, name, OBJPROP_YSIZE, (long)h);
+  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)border);
+  #ifdef OBJPROP_BGCOLOR
+  ObjectSetInteger(0, name, OBJPROP_BGCOLOR, (long)bg);
+  #endif
+  ObjectSetInteger(0, name, OBJPROP_WIDTH, (long)1);
+  ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
+}
+
+void HUD_Label(string name, int x, int y, string text, color clr, int fontSize, bool bold)
+{
+  if(ObjectFind(0, name) == -1) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+  HUD_ApplyCommon(name);
+  ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (long)x);
+  ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
+  ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
+  ObjectSetInteger(0, name, OBJPROP_FONTSIZE, (long)fontSize);
+  #ifdef OBJPROP_BOLD
+  ObjectSetInteger(0, name, OBJPROP_BOLD, (long)bold);
+  #endif
+  ObjectSetString(0, name, OBJPROP_FONT, "Segoe UI");
+  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)clr);
+  ObjectSetString(0, name, OBJPROP_TEXT, text);
+}
+
+void HUD_Button(string name, int x, int y, int w, int h, string text, color bg, color fg, int fontSize)
+{
+  if(ObjectFind(0, name) == -1) ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+  HUD_ApplyCommon(name);
+  ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (long)x);
+  ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
+  ObjectSetInteger(0, name, OBJPROP_XSIZE, (long)w);
+  ObjectSetInteger(0, name, OBJPROP_YSIZE, (long)h);
+  ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
+  ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, (long)bg);
+  ObjectSetInteger(0, name, OBJPROP_BGCOLOR, (long)bg);
+  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)fg);
+  ObjectSetInteger(0, name, OBJPROP_FONTSIZE, (long)fontSize);
+  ObjectSetString(0, name, OBJPROP_FONT, "Segoe UI");
+  ObjectSetString(0, name, OBJPROP_TEXT, text);
+  ObjectSetInteger(0, name, OBJPROP_STATE, (long)false);
+}
+
+// Only sets the *default* text at creation time -- never overwrites it afterward, so a user
+// typing into the box doesn't get stomped on the next tick's update.
+void HUD_Edit(string name, int x, int y, int w, int h, string defaultText)
+{
+  bool isNew = (ObjectFind(0, name) == -1);
+  if(isNew) ObjectCreate(0, name, OBJ_EDIT, 0, 0, 0);
+  HUD_ApplyCommon(name);
+  ObjectSetInteger(0, name, OBJPROP_XDISTANCE, (long)x);
+  ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
+  ObjectSetInteger(0, name, OBJPROP_XSIZE, (long)w);
+  ObjectSetInteger(0, name, OBJPROP_YSIZE, (long)h);
+  ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)true); // must be selectable to type into
+  ObjectSetInteger(0, name, OBJPROP_ALIGN, (long)ALIGN_CENTER);
+  ObjectSetInteger(0, name, OBJPROP_BGCOLOR, (long)HUD_FIELDBG);
+  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)HUD_TEXT);
+  ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, (long)HUD_SUBTEXT);
+  ObjectSetInteger(0, name, OBJPROP_FONTSIZE, (long)9);
+  ObjectSetString(0, name, OBJPROP_FONT, "Segoe UI");
+  if(isNew) ObjectSetString(0, name, OBJPROP_TEXT, defaultText);
+}
+
+void HUD_SetVisible(string name, bool visible)
+{
+  ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, visible ? (long)OBJ_ALL_PERIODS : (long)0);
+}
+
+double HUD_GetEditDouble(string name)
+{
+  return StringToDouble(ObjectGetString(0, name, OBJPROP_TEXT));
+}
+
+//---------- stats not already available elsewhere: profit factor, historical max drawdown ----------
+void GetProfitFactorStats(double &pf, double &grossWin, double &grossLoss)
+{
+  pf = 0.0; grossWin = 0.0; grossLoss = 0.0;
+  if(!HistorySelect(0, TimeCurrent())) return;
+  int deals = HistoryDealsTotal();
+  for(int i = 0; i < deals; i++)
+  {
+    ulong dealTicket = HistoryDealGetTicket(i);
+    if(dealTicket == 0) continue;
+    if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+    if(!InpStatsAccountWide)
+    {
+      if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
+      if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != InpSymbol) continue;
+    }
+    double p = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+    if(p > 0.0) grossWin += p; else if(p < 0.0) grossLoss += -p;
+  }
+  pf = (grossLoss > 0.0 ? grossWin / grossLoss : (grossWin > 0.0 ? -1.0 /*inf*/ : 0.0));
+}
+
+// Historical max drawdown across the same deal history GetProfitFactorStats/GetTradeWinLossStats
+// use, walked in chronological order from a baseline of (current balance - total realized P/L).
+void GetMaxDrawdownStats(double &ddAbs, double &ddPct)
+{
+  ddAbs = 0.0; ddPct = 0.0;
   double totalPL = GetAccountHistoryProfitAll();
-  
-  // Title with EA name
-  string txtTitle = "MGNFY GOLD EA";
-  ObjectSetString(0, kHUDTitleName, OBJPROP_TEXT, txtTitle);
-  
-  // Running profit with percentage and color coding - format matches example
-  double balanceStart = balance - totalPL;
-  double pctProfit = (balanceStart > 0.0 ? (totalProfit / balanceStart * 100.0) : 0.0);
-  string txtProfit  = StringFormat("TOTAL: $%s (%.1f%%)", FormatWithCommas(totalProfit), pctProfit);
-  ObjectSetString(0, kStatsProfitName, OBJPROP_TEXT, txtProfit);
-  color profitClr = GetProfitColor(totalProfit);
-  ObjectSetInteger(0, kStatsProfitName, OBJPROP_COLOR, (long)profitClr);
-  
-  // System info: Spread, Lot, Risk - format matches example exactly
-  int spread = (int)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD);
-  long leverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
-  string riskLev = GetRiskLevel();
-  string txtSystem = StringFormat("SPREAD: %d | LOT: %.2f | RISK: %s", spread, InpLots, riskLev);
-  ObjectSetString(0, kHUDSystemName, OBJPROP_TEXT, txtSystem);
-  
-  // Trading params: Leverage, Stop Level - format matches example exactly
-  int stopLevel = GetStopsLevelPoints();
-  string txtParams = StringFormat("LEVERAGE: 1:%d | STOP LEVEL: %d pts", leverage, stopLevel);
-  ObjectSetString(0, kHUDParamsName, OBJPROP_TEXT, txtParams);
-  
-  // Win/Loss Trades with percentages - updates automatically after trades close
+  double running = AccountInfoDouble(ACCOUNT_BALANCE) - totalPL;
+  double peak = running;
+  if(!HistorySelect(0, TimeCurrent())) return;
+  int deals = HistoryDealsTotal();
+  for(int i = 0; i < deals; i++)
+  {
+    ulong dealTicket = HistoryDealGetTicket(i);
+    if(dealTicket == 0) continue;
+    if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+    if(!InpStatsAccountWide)
+    {
+      if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
+      if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != InpSymbol) continue;
+    }
+    running += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+    if(running > peak) peak = running;
+    double dd = peak - running;
+    if(dd > ddAbs) { ddAbs = dd; ddPct = (peak > 0.0 ? dd / peak * 100.0 : 0.0); }
+  }
+}
+
+double HUD_CalcProfit(bool isBuy, double lots, double openPrice, double closePrice)
+{
+  double profit = 0.0;
+  ENUM_ORDER_TYPE ot = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+  if(lots <= 0.0 || openPrice <= 0.0 || closePrice <= 0.0) return 0.0;
+  if(!OrderCalcProfit(ot, InpSymbol, lots, openPrice, closePrice, profit)) return 0.0;
+  return profit;
+}
+
+//========================================= EnsureHUD =========================================
+// Builds every object exactly once (all static layout: position/size/font/color). Called every
+// OnTick() like the old EnsureStatsLabel() was, but the ObjectFind guard inside each helper means
+// after the first call this is just a cheap no-op loop of ObjectFind() checks.
+void EnsureHUD()
+{
+  int x = HUD_PanelX, w = HUD_PanelW;
+  int pad = 14;
+  int innerX = x + pad;
+  int innerW = w - pad * 2;
+
+  HUD_Rect(HUD_PREFIX + "BG", x, HUD_PanelY, w, HUD_PanelH, HUD_BG, HUD_BORDER);
+
+  int y = HUD_PanelY + 12;
+  HUD_Label(HUD_PREFIX + "TITLE", innerX, y, "MGNFY GOLD", HUD_HEADER, 15, true); y += 20;
+  HUD_Label(HUD_PREFIX + "SUB", innerX, y, "", HUD_SUBTEXT, 9, false); y += 22;
+
+  // Tab buttons
+  int tabW = (innerW - 6) / 2;
+  HUD_Button(HUD_PREFIX + "TAB0", innerX, y, tabW, 24, "STATS", HUD_TABBG_ON, HUD_TABFG_ON, 9);
+  HUD_Button(HUD_PREFIX + "TAB1", innerX + tabW + 6, y, tabW, 24, "RISK CALC", HUD_TABBG_OFF, HUD_TABFG_OFF, 9);
+  y += 24 + 10;
+
+  int contentTop = y; // both tabs' content starts here
+
+  //---------------- STATS TAB ----------------
+  y = contentTop;
+  HUD_Label(HUD_PREFIX + "S_ACCT_HDR", innerX, y, "ACCOUNT", HUD_HEADER, 9, true); y += 16;
+  HUD_Label(HUD_PREFIX + "S_BAL",   innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_EQ",    innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_FLOAT", innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_TODAY", innerX, y, "", HUD_TEXT, 10, false); y += 18;
+  HUD_Rect(HUD_PREFIX + "S_DIV1", innerX, y, innerW, 1, HUD_SUBTEXT, HUD_SUBTEXT); y += 10;
+
+  HUD_Label(HUD_PREFIX + "S_PERF_HDR", innerX, y, "PERFORMANCE", HUD_HEADER, 9, true); y += 18;
+  HUD_Label(HUD_PREFIX + "S_WINRATE",  innerX, y, "", HUD_TEXT, 13, true); y += 20;
+  HUD_Label(HUD_PREFIX + "S_WL",       innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_PF",       innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_DD",       innerX, y, "", HUD_TEXT, 10, false); y += 18;
+  HUD_Rect(HUD_PREFIX + "S_DIV2", innerX, y, innerW, 1, HUD_SUBTEXT, HUD_SUBTEXT); y += 10;
+
+  HUD_Label(HUD_PREFIX + "S_POS_HDR", innerX, y, "OPEN POSITION", HUD_HEADER, 9, true); y += 16;
+  HUD_Label(HUD_PREFIX + "S_POS1", innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_POS2", innerX, y, "", HUD_TEXT, 10, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_POS3", innerX, y, "", HUD_TEXT, 10, false); y += 18;
+  HUD_Rect(HUD_PREFIX + "S_DIV3", innerX, y, innerW, 1, HUD_SUBTEXT, HUD_SUBTEXT); y += 10;
+
+  HUD_Label(HUD_PREFIX + "S_SYS_HDR", innerX, y, "SYSTEM", HUD_HEADER, 9, true); y += 16;
+  HUD_Label(HUD_PREFIX + "S_SYS1", innerX, y, "", HUD_SUBTEXT, 9, false); y += 14;
+  HUD_Label(HUD_PREFIX + "S_SYS2", innerX, y, "", HUD_SUBTEXT, 9, false); y += 16;
+
+  //---------------- RISK CALCULATOR TAB ----------------
+  y = contentTop;
+  HUD_Label(HUD_PREFIX + "C_PRICE", innerX, y, "", HUD_SUBTEXT, 9, false); y += 18;
+
+  HUD_Button(HUD_PREFIX + "C_DIRBTN", innerX, y, innerW, 24, "BUY", HUD_GREEN, HUD_TABFG_ON, 10);
+  y += 24 + 10;
+
+  int lblW = 78, fldH = 20;
+  HUD_Label(HUD_PREFIX + "C_LBL_ENTRY", innerX, y + 4, "Entry price", HUD_SUBTEXT, 9, false);
+  HUD_Edit(HUD_PREFIX + "C_ENTRY", innerX + lblW, y, innerW - lblW, fldH, "0.00");
+  y += fldH + 6;
+  HUD_Label(HUD_PREFIX + "C_LBL_LOT", innerX, y + 4, "Lot size", HUD_SUBTEXT, 9, false);
+  HUD_Edit(HUD_PREFIX + "C_LOT", innerX + lblW, y, innerW - lblW, fldH, DoubleToString(InpLots, 2));
+  y += fldH + 6;
+  HUD_Label(HUD_PREFIX + "C_LBL_TP", innerX, y + 4, "Exit (TP) price", HUD_SUBTEXT, 9, false);
+  HUD_Edit(HUD_PREFIX + "C_TP", innerX + lblW, y, innerW - lblW, fldH, "0.00");
+  y += fldH + 6;
+  HUD_Label(HUD_PREFIX + "C_LBL_SL", innerX, y + 4, "Exit (SL) price", HUD_SUBTEXT, 9, false);
+  HUD_Edit(HUD_PREFIX + "C_SL", innerX + lblW, y, innerW - lblW, fldH, "0.00");
+  y += fldH + 10;
+
+  HUD_Rect(HUD_PREFIX + "C_DIV1", innerX, y, innerW, 1, HUD_SUBTEXT, HUD_SUBTEXT); y += 10;
+  HUD_Label(HUD_PREFIX + "C_RESULT_HDR", innerX, y, "RESULT", HUD_HEADER, 9, true); y += 18;
+  HUD_Label(HUD_PREFIX + "C_TPRESULT", innerX, y, "", HUD_TEXT, 11, true); y += 18;
+  HUD_Label(HUD_PREFIX + "C_SLRESULT", innerX, y, "", HUD_TEXT, 11, true); y += 18;
+  HUD_Label(HUD_PREFIX + "C_RR", innerX, y, "", HUD_SUBTEXT, 9, false); y += 20;
+  HUD_Label(HUD_PREFIX + "C_HINT", innerX, y, "Edit a field, press Enter to recalc", HUD_SUBTEXT, 8, false);
+
+  if(!g_hudBuilt)
+  {
+    g_hudBuilt = true;
+    // seed sensible defaults for the calculator the first time it's ever built
+    double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+    double atrGuess = 0.0;
+    if(hATR != INVALID_HANDLE)
+    {
+      double a[1];
+      if(CopyBuffer(hATR, 0, 0, 1, a) == 1) atrGuess = a[0];
+    }
+    if(ask > 0.0)
+    {
+      ObjectSetString(0, HUD_PREFIX + "C_ENTRY", OBJPROP_TEXT, DoubleToString(ask, _Digits));
+      if(atrGuess > 0.0)
+      {
+        ObjectSetString(0, HUD_PREFIX + "C_TP", OBJPROP_TEXT, DoubleToString(ask + 2.0 * atrGuess, _Digits));
+        ObjectSetString(0, HUD_PREFIX + "C_SL", OBJPROP_TEXT, DoubleToString(ask - 1.0 * atrGuess, _Digits));
+      }
+    }
+  }
+
+  ApplyHUDTabVisibility();
+}
+
+void ApplyHUDTabVisibility()
+{
+  string statsObjs[] = {"S_ACCT_HDR","S_BAL","S_EQ","S_FLOAT","S_TODAY","S_DIV1",
+                         "S_PERF_HDR","S_WINRATE","S_WL","S_PF","S_DD","S_DIV2",
+                         "S_POS_HDR","S_POS1","S_POS2","S_POS3","S_DIV3",
+                         "S_SYS_HDR","S_SYS1","S_SYS2"};
+  string calcObjs[] = {"C_PRICE","C_DIRBTN","C_LBL_ENTRY","C_ENTRY","C_LBL_LOT","C_LOT",
+                        "C_LBL_TP","C_TP","C_LBL_SL","C_SL","C_DIV1",
+                        "C_RESULT_HDR","C_TPRESULT","C_SLRESULT","C_RR","C_HINT"};
+  bool showStats = (g_hudTab == 0);
+  for(int i = 0; i < ArraySize(statsObjs); i++) HUD_SetVisible(HUD_PREFIX + statsObjs[i], showStats);
+  for(int i = 0; i < ArraySize(calcObjs); i++)  HUD_SetVisible(HUD_PREFIX + calcObjs[i], !showStats);
+
+  ObjectSetInteger(0, HUD_PREFIX + "TAB0", OBJPROP_BGCOLOR, (long)(showStats ? HUD_TABBG_ON : HUD_TABBG_OFF));
+  ObjectSetInteger(0, HUD_PREFIX + "TAB0", OBJPROP_COLOR,   (long)(showStats ? HUD_TABFG_ON : HUD_TABFG_OFF));
+  ObjectSetInteger(0, HUD_PREFIX + "TAB1", OBJPROP_BGCOLOR, (long)(showStats ? HUD_TABBG_OFF : HUD_TABBG_ON));
+  ObjectSetInteger(0, HUD_PREFIX + "TAB1", OBJPROP_COLOR,   (long)(showStats ? HUD_TABFG_OFF : HUD_TABFG_ON));
+}
+
+//========================================= UpdateHUD =========================================
+// Called every OnTick(); only touches dynamic TEXT/color (never edit-box text, so typing in the
+// risk calculator is never stomped) -- cheap enough to run unconditionally.
+void UpdateHUD()
+{
+  EnsureHUD();
+
+  string sub = StringFormat("%s  |  %s", InpSymbol, EnumToString((ENUM_TIMEFRAMES)Period()));
+  ObjectSetString(0, HUD_PREFIX + "SUB", OBJPROP_TEXT, sub);
+
+  if(g_hudTab == 0) UpdateStatsTab();
+  else              UpdateCalcTab();
+}
+
+void UpdateStatsTab()
+{
+  double realized = GetEARealizedProfit();
+  double floating = GetEAFloatingProfit();
+  double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
+  double equity   = AccountInfoDouble(ACCOUNT_EQUITY);
+
+  ObjectSetString(0, HUD_PREFIX + "S_BAL", OBJPROP_TEXT, StringFormat("Balance:      $%s", FormatWithCommas(balance)));
+  ObjectSetString(0, HUD_PREFIX + "S_EQ",  OBJPROP_TEXT, StringFormat("Equity:       $%s", FormatWithCommas(equity)));
+  string floatTxt = StringFormat("Floating P/L: $%s", FormatWithCommas(floating));
+  ObjectSetString(0, HUD_PREFIX + "S_FLOAT", OBJPROP_TEXT, floatTxt);
+  ObjectSetInteger(0, HUD_PREFIX + "S_FLOAT", OBJPROP_COLOR, (long)(floating > 0 ? HUD_GREEN : (floating < 0 ? HUD_RED : HUD_TEXT)));
+  string todayTxt = StringFormat("Realized P/L: $%s", FormatWithCommas(realized));
+  ObjectSetString(0, HUD_PREFIX + "S_TODAY", OBJPROP_TEXT, todayTxt);
+  ObjectSetInteger(0, HUD_PREFIX + "S_TODAY", OBJPROP_COLOR, (long)(realized > 0 ? HUD_GREEN : (realized < 0 ? HUD_RED : HUD_TEXT)));
+
   int winCount = 0, lossCount = 0;
   double winRate = 0.0, lossRate = 0.0;
   GetTradeWinLossStats(winCount, lossCount, winRate, lossRate);
-  string txtWinTrades = StringFormat("WIN TRADES: %d (%.1f%%)", winCount, winRate);
-  ObjectSetString(0, kHUDWinTradesName, OBJPROP_TEXT, txtWinTrades);
-  string txtLossTrades = StringFormat("LOSS TRADES: %d (%.1f%%)", lossCount, lossRate);
-  ObjectSetString(0, kHUDLossTradesName, OBJPROP_TEXT, txtLossTrades);
-  
-  // Drawdown (floating drawdown: Balance - Equity when Equity < Balance)
-  double drawdown = 0.0;
-  if(equity < balance)
-    drawdown = balance - equity;
-  string txtDrawdown = StringFormat("DRAWDOWN: $%s", FormatWithCommas(drawdown));
-  ObjectSetString(0, kHUDDrawdownName, OBJPROP_TEXT, txtDrawdown);
-  color drawdownClr = (drawdown > 0.0 ? clrDarkRed : clrBlack); // red if drawdown exists, black if none
-  ObjectSetInteger(0, kHUDDrawdownName, OBJPROP_COLOR, (long)drawdownClr);
-  
-  // Account balance - format matches example
-  string txtBalance = StringFormat("BALANCE: $%s", FormatWithCommas(balance));
-  ObjectSetString(0, kStatsBalanceName, OBJPROP_TEXT, txtBalance);
-  
-  // Account P/L (Realized - NOT floating) - format matches example
-  // Note: This is REALIZED profit/loss from closed trades, not floating P/L
-  string txtPL   = StringFormat("ACCOUNT P/L: $%s (Realized)", FormatWithCommas(totalPL));
-  ObjectSetString(0, kStatsPLName, OBJPROP_TEXT, txtPL);
-  color plClr = GetProfitColor(totalPL);
-  ObjectSetInteger(0, kStatsPLName, OBJPROP_COLOR, (long)plClr);
+  int totalTrades = winCount + lossCount;
+  ObjectSetString(0, HUD_PREFIX + "S_WINRATE", OBJPROP_TEXT, StringFormat("Win rate: %.1f%%  (%d trades)", winRate, totalTrades));
+  ObjectSetInteger(0, HUD_PREFIX + "S_WINRATE", OBJPROP_COLOR, (long)(winRate >= 50.0 ? HUD_GREEN : (totalTrades == 0 ? HUD_TEXT : HUD_RED)));
+  ObjectSetString(0, HUD_PREFIX + "S_WL", OBJPROP_TEXT, StringFormat("Wins: %d     Losses: %d", winCount, lossCount));
+
+  double pf = 0.0, grossWin = 0.0, grossLoss = 0.0;
+  GetProfitFactorStats(pf, grossWin, grossLoss);
+  string pfTxt = (pf < 0.0 ? "Profit factor: inf" : StringFormat("Profit factor: %.2f", pf));
+  ObjectSetString(0, HUD_PREFIX + "S_PF", OBJPROP_TEXT, pfTxt);
+  ObjectSetInteger(0, HUD_PREFIX + "S_PF", OBJPROP_COLOR, (long)(pf >= 1.0 || pf < 0.0 ? HUD_GREEN : HUD_RED));
+
+  double ddAbs = 0.0, ddPct = 0.0;
+  GetMaxDrawdownStats(ddAbs, ddPct);
+  ObjectSetString(0, HUD_PREFIX + "S_DD", OBJPROP_TEXT, StringFormat("Max drawdown: $%s (%.1f%%)", FormatWithCommas(ddAbs), ddPct));
+
+  double posEntry = 0.0, posSL = 0.0;
+  int posDir = CurrentPositionDirection(posEntry, posSL);
+  if(posDir != 0)
+  {
+    ObjectSetString(0, HUD_PREFIX + "S_POS1", OBJPROP_TEXT,
+      StringFormat("%s @ %s", (posDir == 1 ? "BUY" : "SELL"), DoubleToString(posEntry, _Digits)));
+    ObjectSetInteger(0, HUD_PREFIX + "S_POS1", OBJPROP_COLOR, (long)(posDir == 1 ? HUD_GREEN : HUD_RED));
+    ObjectSetString(0, HUD_PREFIX + "S_POS2", OBJPROP_TEXT,
+      StringFormat("P/L: $%s   SL: %s", FormatWithCommas(floating), DoubleToString(posSL, _Digits)));
+    ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT,
+      StringFormat("TP1: %s   TP2: %s", (tp1Hit ? "hit" : "pending"), (tp2Hit ? "hit" : "pending")));
+  }
+  else
+  {
+    ObjectSetString(0, HUD_PREFIX + "S_POS1", OBJPROP_TEXT, "No open position");
+    ObjectSetInteger(0, HUD_PREFIX + "S_POS1", OBJPROP_COLOR, (long)HUD_SUBTEXT);
+    ObjectSetString(0, HUD_PREFIX + "S_POS2", OBJPROP_TEXT, "");
+    ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT, "");
+  }
+
+  int spread = (int)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD);
+  long leverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
+  ObjectSetString(0, HUD_PREFIX + "S_SYS1", OBJPROP_TEXT, StringFormat("Spread: %d pts   Lot: %.2f", spread, InpLots));
+  ObjectSetString(0, HUD_PREFIX + "S_SYS2", OBJPROP_TEXT, StringFormat("Leverage: 1:%d   Risk: %s", (int)leverage, GetRiskLevel()));
+}
+
+void UpdateCalcTab()
+{
+  double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+  double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+  ObjectSetString(0, HUD_PREFIX + "C_PRICE", OBJPROP_TEXT,
+    StringFormat("Bid %s   Ask %s", DoubleToString(bid, _Digits), DoubleToString(ask, _Digits)));
+
+  ObjectSetString(0, HUD_PREFIX + "C_DIRBTN", OBJPROP_TEXT, g_calcIsBuy ? "BUY" : "SELL");
+  ObjectSetInteger(0, HUD_PREFIX + "C_DIRBTN", OBJPROP_BGCOLOR, (long)(g_calcIsBuy ? HUD_GREEN : HUD_RED));
+
+  double entry = HUD_GetEditDouble(HUD_PREFIX + "C_ENTRY");
+  double lots  = HUD_GetEditDouble(HUD_PREFIX + "C_LOT");
+  double tp    = HUD_GetEditDouble(HUD_PREFIX + "C_TP");
+  double sl    = HUD_GetEditDouble(HUD_PREFIX + "C_SL");
+
+  double tpProfit = HUD_CalcProfit(g_calcIsBuy, lots, entry, tp);
+  double slProfit = HUD_CalcProfit(g_calcIsBuy, lots, entry, sl);
+
+  double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+  double tpPts = (point > 0.0 && entry > 0.0 && tp > 0.0) ? MathAbs(tp - entry) / point : 0.0;
+  double slPts = (point > 0.0 && entry > 0.0 && sl > 0.0) ? MathAbs(entry - sl) / point : 0.0;
+
+  ObjectSetString(0, HUD_PREFIX + "C_TPRESULT", OBJPROP_TEXT,
+    StringFormat("If TP hit:  %s$%s  (%.0f pts)", (tpProfit >= 0 ? "+" : "-"), FormatWithCommas(MathAbs(tpProfit)), tpPts));
+  ObjectSetInteger(0, HUD_PREFIX + "C_TPRESULT", OBJPROP_COLOR, (long)(tpProfit >= 0 ? HUD_GREEN : HUD_RED));
+
+  ObjectSetString(0, HUD_PREFIX + "C_SLRESULT", OBJPROP_TEXT,
+    StringFormat("If SL hit:  %s$%s  (%.0f pts)", (slProfit >= 0 ? "+" : "-"), FormatWithCommas(MathAbs(slProfit)), slPts));
+  ObjectSetInteger(0, HUD_PREFIX + "C_SLRESULT", OBJPROP_COLOR, (long)(slProfit >= 0 ? HUD_GREEN : HUD_RED));
+
+  if(tpPts > 0.0 && slPts > 0.0)
+    ObjectSetString(0, HUD_PREFIX + "C_RR", OBJPROP_TEXT, StringFormat("Risk:Reward = 1 : %.2f", tpPts / slPts));
+  else
+    ObjectSetString(0, HUD_PREFIX + "C_RR", OBJPROP_TEXT, "Risk:Reward = --");
+}
+
+//========================================= OnChartEvent =========================================
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+  if(id == CHARTEVENT_OBJECT_CLICK)
+  {
+    if(sparam == HUD_PREFIX + "TAB0" && g_hudTab != 0) { g_hudTab = 0; ApplyHUDTabVisibility(); UpdateHUD(); }
+    else if(sparam == HUD_PREFIX + "TAB1" && g_hudTab != 1) { g_hudTab = 1; ApplyHUDTabVisibility(); UpdateHUD(); }
+    else if(sparam == HUD_PREFIX + "C_DIRBTN") { g_calcIsBuy = !g_calcIsBuy; UpdateCalcTab(); }
+    ObjectSetInteger(0, sparam, OBJPROP_STATE, (long)false); // never leave it looking "stuck pressed"
+    ChartRedraw(0);
+  }
+  else if(id == CHARTEVENT_OBJECT_ENDEDIT)
+  {
+    if(sparam == HUD_PREFIX + "C_ENTRY" || sparam == HUD_PREFIX + "C_LOT" ||
+       sparam == HUD_PREFIX + "C_TP"    || sparam == HUD_PREFIX + "C_SL")
+    {
+      UpdateCalcTab();
+      ChartRedraw(0);
+    }
+  }
 }
 
 void MoveSLto(double slNew)
@@ -849,8 +1011,8 @@ int OnInit()
   lastTicket = 0;
   
   // Initialize HUD immediately so it's visible from start (including backtests)
-  EnsureStatsLabel();
-  UpdateStatsLabel();
+  EnsureHUD();
+  UpdateHUD();
   PrintFormat("Init: RequireFlip=%d MidlineBreak=%d ConfirmBars=%d ATRmult=%.2f ATRSL=%.2f RiskSizing=%d Risk%%=%.2f MarginCheck=%d SpreadMax=%d",
               (int)InpRequireTrendFlip, (int)InpUseMidlineBreakout, InpBreakoutConfirmBars,
               InpATRMultiplier, InpSL_ATR_Mult, (int)InpUseRiskSizing, InpRiskPercent,
@@ -864,7 +1026,7 @@ void OnTick()
 {
   if(Symbol() != InpSymbol) return;
   if(!EnsureHandles()) return;
-  UpdateStatsLabel();
+  UpdateHUD();
 
   // gate logic to new bar for signal generation
   bool newBar = IsNewBar();
@@ -1341,17 +1503,7 @@ void OnDeinit(const int reason)
   if(hEMALow != INVALID_HANDLE)   { IndicatorRelease(hEMALow); hEMALow = INVALID_HANDLE; }
   if(hTrendEMA != INVALID_HANDLE) { IndicatorRelease(hTrendEMA); hTrendEMA = INVALID_HANDLE; }
   
-  // Cleanup HUD objects
-  ObjectDelete(0, kStatsBgName);
-  ObjectDelete(0, kStatsProfitName);
-  ObjectDelete(0, kStatsBalanceName);
-  ObjectDelete(0, kStatsPLName);
-  ObjectDelete(0, kHUDTitleName);
-  ObjectDelete(0, kHUDSystemName);
-  ObjectDelete(0, kHUDParamsName);
-  ObjectDelete(0, kHUDWinTradesName);
-  ObjectDelete(0, kHUDLossTradesName);
-  ObjectDelete(0, kHUDDrawdownName);
-  ObjectDelete(0, kHUDSeparator1Name);
-  ObjectDelete(0, kHUDSeparator2Name);
+  // Cleanup HUD objects -- every HUD object uses this prefix, so one call catches all of them
+  // (including anything a future edit adds, without needing to keep this list in sync by hand).
+  ObjectsDeleteAll(0, HUD_PREFIX);
 }
