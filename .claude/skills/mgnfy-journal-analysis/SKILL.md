@@ -34,14 +34,23 @@ Strategy Tester run.
   timeframe combination): `trades, wins, losses, win_rate, net, pf,
   max_dd_pct, avg_win, avg_loss, max_win, max_loss, max_consec_wins,
   max_consec_losses, end_eq, run_id, week, signal_tf, status`.
-- **`mt5_journal_trades.csv`** — every individual trade, sourced directly
-  from MT5's own Deals table (not derived/simulated): `run_id, week,
-  signal_tf, entry_time, dir, entry_price, exit_time, exit_price,
-  exit_comment, volume, pnl, balance_after`. `exit_comment` carries MT5's
-  own exit reason (e.g. `sl 4182.215`, or `end of test` for a forced
-  mark-to-market close at the test boundary) — use it to check whether
-  TP levels are actually firing (as of 2026-09-15, they are not — see
-  JOURNAL.md's bug writeup).
+- **`mt5_journal_trades.csv`** — every individual trade, enriched (as of
+  2026-09-15) by joining MT5's Orders table (initial SL/TP at order
+  placement) to its Deals table (actual fills): `run_id, week, signal_tf,
+  entry_time, dir, entry_price, initial_sl, exit_time, exit_price,
+  exit_comment, pnl, balance_after, risk_dollars, r_multiple,
+  hold_minutes, final_sl_price, sl_moved, exit_kind`. Key derived columns:
+  `risk_dollars` = `|entry_price - initial_sl| * 100 * lot` (the real $
+  risked at entry, before any trailing); `r_multiple` = `pnl /
+  risk_dollars`; `sl_moved` = whether the stop differs from its initial
+  placement by exit (trailing/BE engaged); `exit_kind` = extracted from
+  `exit_comment` (`sl`, `tp1`/`tp2`/`tp3`, or `end` for a forced
+  end-of-test close) — use it to check whether TP levels are actually
+  firing (as of 2026-09-15, they are not — see JOURNAL.md's bug writeup).
+  Regenerate with `mt5_deep_parse.py`, which re-parses the raw `.htm`
+  reports already on disk (or produced by a fresh `mt5_journal.py` run) —
+  see that script if you need to add more derived columns rather than
+  hand-editing the CSV.
 - **`mt5_journal_by_hour.csv` / `mt5_journal_by_weekday.csv`** — pooled
   entry-time breakdowns, already computed.
 
