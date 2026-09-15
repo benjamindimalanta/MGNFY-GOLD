@@ -25,6 +25,22 @@ could visually cut through it.
 - Dark, high-contrast, gold-accent theme, replacing a plain white panel
   that didn't match the file's own long-standing "dark-themed HUD"
   description.
+- **Bugfix, found while testing the above**: `DrawLine()` (draws the
+  Entry/SL/TP1/TP2/TP3 lines on chart) suffixed every object's name with
+  the current bar's timestamp, so it created a brand-new HLINE object
+  every single bar a trade stayed open instead of ever matching an
+  existing one to move — one full set of lines per bar, unbounded,
+  never cleaned up (the existing cleanup function's condition only
+  handled `InpVisualKeepBars <= 1` and silently did nothing otherwise;
+  the shipped default reads 1, but at least one preset/test config in
+  the field was running with a different value, e.g. 2, which disabled
+  cleanup entirely). Visible as a wall of stacked green TP lines and real
+  lag once a trend trade rode across many bars — reported by the user
+  running Tester visual mode. Fixed: each line is now one persistent
+  object, moved in place every update; `CleanupOldVisuals()` now just
+  clears the trade lines once flat instead of sweeping by bar age.
+  `InpVisualKeepBars` is unused as of this fix (kept only so old presets
+  referencing it still load without error).
 
 ## [1.12] - 2026-09-15
 Backtested against 2 years of real XAUUSDm broker data before shipping —

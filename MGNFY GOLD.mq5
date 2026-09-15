@@ -104,7 +104,7 @@ input int      InpSessionEndHour       = 22;              // End hour (exclusive
 // Trailing stop
 input bool     InpUseATRTrailing       = true;            // Trail stop using ATR
 input double   InpTrail_ATR_Mult       = 1.5;             // Trail distance in ATRs (was 1.0; 1.5 tested best with stairstep lock)
-input int      InpVisualKeepBars       = 1;               // Keep only visuals for last N bars (1 = current bar)
+input int      InpVisualKeepBars       = 1;               // Unused since v1.13 (Entry/SL/TP lines are now one persistent object each, moved not re-created -- see DrawLine/CleanupOldVisuals). Kept only so old presets referencing it still load.
 // Stats options
 input bool     InpStatsAccountWide     = false;           // If true, HUD profit uses all symbols/magics (account-wide)
 input bool     InpStatsTodayOnly       = true;            // Sum realized profit for today only (matches MT5 'Today')
@@ -328,42 +328,41 @@ int CurrentPositionDirection(double &entryPrice, double &slPrice)
   return 0;
 }
 
+// 2026-09-15 bugfix: this used to suffix every line's object name with the current bar's
+// timestamp (name + "_" + lastBarTime), which meant a "new" object every single bar instead of
+// ever matching an existing one to move -- Entry/SL/TP1/TP2/TP3 (and the EMA cloud) accumulated
+// one full set of HLINE objects PER BAR the trade stayed open, unbounded, which is what caused
+// the wall of stacked green TP lines and the lag the user hit running Tester visual mode over a
+// trade that rode a long trend. Fixed: one persistent, fixed-name object per line, moved in place
+// every update -- exactly the "if exists, move; else create" behavior this function always
+// intended, now that the name is actually stable.
 void DrawLine(const string name, double price, color clr)
 {
   if(!InpDrawVisuals) return;
-  string full = name + "_" + IntegerToString((long)lastBarTime);
-  if(ObjectFind(0, full) == -1)
+  if(ObjectFind(0, name) == -1)
   {
-    ObjectCreate(0, full, OBJ_HLINE, 0, 0, price);
-    ObjectSetInteger(0, full, OBJPROP_COLOR, clr);
-    ObjectSetInteger(0, full, OBJPROP_STYLE, STYLE_SOLID);
-    ObjectSetInteger(0, full, OBJPROP_WIDTH, 1);
+    ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
   }
   else
   {
-    ObjectSetDouble(0, full, OBJPROP_PRICE, price);
+    ObjectSetDouble(0, name, OBJPROP_PRICE, price);
   }
+  ObjectSetInteger(0, name, OBJPROP_COLOR, clr); // cloud color can change bar to bar
 }
 
-void CleanupOldVisuals()
+// Lines are now persistent single objects (see DrawLine above), so there's nothing to sweep by
+// bar age any more -- this just clears the trade-specific lines (Entry/SL/TP1-3) once the
+// position is flat, so they don't linger on the chart pointing at a closed trade. The EMA cloud
+// lines are left alone here since they're a standing indicator, not tied to a position.
+void CleanupOldVisuals(int posDir)
 {
   if(!InpDrawVisuals) return;
-  int total = ObjectsTotal(0, -1, -1);
-  for(int i=total-1; i>=0; --i)
-  {
-    string obj = ObjectName(0, i);
-    if(StringFind(obj, "Entry_") == 0 || StringFind(obj, "SL_") == 0 || StringFind(obj, "TP") == 0 || StringFind(obj, "Cloud") == 0)
-    {
-      int pos = StringFind(obj, "_");
-      if(pos > 0)
-      {
-        string tsStr = StringSubstr(obj, pos+1);
-        long ts = (long)StringToInteger(tsStr);
-        if(ts != (long)lastBarTime && InpVisualKeepBars <= 1)
-          ObjectDelete(0, obj);
-      }
-    }
-  }
+  if(posDir != 0) return;
+  string tradeLines[] = {"Entry", "SL", "TP1", "TP2", "TP3"};
+  for(int i = 0; i < ArraySize(tradeLines); i++)
+    if(ObjectFind(0, tradeLines[i]) != -1) ObjectDelete(0, tradeLines[i]);
 }
 
 bool ClosePartial(ulong ticket, double frac)
@@ -1487,7 +1486,7 @@ void OnTick()
   // update state for next bar
   if(newBar)
   {
-    CleanupOldVisuals();
+    CleanupOldVisuals(posDir);
     prevUp1 = up1;
     prevDn1 = dn1;
     prevTrend = trend;
