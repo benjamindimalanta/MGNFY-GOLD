@@ -1,8 +1,13 @@
 """Compare the two entry modes on the same weeks through MT5's real Strategy Tester.
 
-Same weeks as the 4-week diagnosis batch (full Mon-Fri each), the user's inputs from the base
-ini, $500 deposit (so the ~$53 margin floor of a $100 account doesn't cut weeks short).
-Only InpEntryMode differs between the two runs of each week.
+Full Mon-Fri weeks, the user's inputs from the base ini, $500 deposit (so the ~$53 margin floor of a
+$100 account doesn't cut weeks short). Only InpEntryMode differs between the two runs of each week.
+
+Environment:
+  WEEKS=4   the 4 diagnosis weeks (Aug 10, Aug 17, Aug 31, Sep 7) -- default
+  WEEKS=12  every full week with tick data, Jun 22 - Sep 11
+  TAG=...   suffix for the trades CSV and report names, so batches don't overwrite each other
+Arguments: optional mode names to run only those (breakout, swing).
 """
 import os
 import re
@@ -15,7 +20,11 @@ import pandas as pd
 import mt5_deep_parse as dp
 from mt5_week_check import BASE_INI, INI_DIR, run_test
 
-WEEKS = [datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 31), datetime(2026, 9, 7)]
+if os.environ.get("WEEKS", "4") == "12":
+    WEEKS = [datetime(2026, 6, 22) + timedelta(weeks=i) for i in range(12)]
+else:
+    WEEKS = [datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 31), datetime(2026, 9, 7)]
+TAG = os.environ.get("TAG", "")
 DEPOSIT = 500.0
 MODES = {"breakout": 0, "swing": 1}
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
@@ -66,13 +75,13 @@ def stats(t):
 
 
 def main():
-    only = sys.argv[1:]  # optional: restrict to mode names
+    only = sys.argv[1:]
     frames = []
     for w in WEEKS:
         for mode, value in MODES.items():
             if only and mode not in only:
                 continue
-            report = f"cmp_{mode}_{w:%Y-%m-%d}__M15sig"
+            report = f"cmp{TAG}_{mode}_{w:%Y-%m-%d}__M15sig"
             ini = make_ini(w, w + timedelta(days=5), report, value)
             print(f"running {report} ...", flush=True)
             path, secs = run_test(ini, report)
@@ -90,21 +99,28 @@ def main():
         return
     allt["entry_time"] = pd.to_datetime(allt["entry_time"])
     allt["exit_time"] = pd.to_datetime(allt["exit_time"])
-    allt.to_csv(os.path.join(SCRATCH, "mode_compare_trades.csv"), index=False)
+    allt.to_csv(os.path.join(SCRATCH, f"mode_compare_trades{TAG}.csv"), index=False)
 
     pd.set_option("display.width", 260)
     pd.set_option("display.max_columns", 30)
     rows = {}
     for w in WEEKS:
         for mode in MODES:
+            if only and mode not in only:
+                continue
             sub = allt[(allt["mode"] == mode) & (allt["week"] == f"{w:%Y-%m-%d}")]
             rows[f"{mode:8s} {w:%Y-%m-%d}"] = stats(sub)
     for mode in MODES:
+        if only and mode not in only:
+            continue
         sub = allt[allt["mode"] == mode]
         pooled = stats(sub)
         pooled["end$"], pooled["maxDD%"], pooled["maxLossRun"] = np.nan, np.nan, np.nan
         pooled["trades/day"] = len(sub) / (5.0 * len(WEEKS))
-        rows[f"{mode:8s} ALL 4 WEEKS"] = pooled
+        weekly = [stats(allt[(allt["mode"] == mode) & (allt["week"] == f"{w:%Y-%m-%d}")])["net$"] for w in WEEKS]
+        pooled["weeks+"] = sum(1 for x in weekly if x > 0)
+        pooled["weeks-"] = sum(1 for x in weekly if x < 0)
+        rows[f"{mode:8s} ALL {len(WEEKS)} WEEKS"] = pooled
     print(f"\n=== MODE COMPARISON (${DEPOSIT:.0f} start each week, real ticks, user's inputs) ===")
     print(pd.DataFrame(rows).T.round(2).to_string())
 

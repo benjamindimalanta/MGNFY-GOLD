@@ -2,6 +2,30 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.15] - 2026-09-15
+Swing-mode order handling, requested by the user after the v1.14 comparison.
+
+- Pending orders are kept across hourly bias checks. One is cancelled only when
+  the bias flips to the opposite direction, the swing level for the same
+  direction changes, or price moves more than `InpSwingMaxDistATR` x ATR(M30)
+  away from it. New input `InpSwingCancelOnWait` (default off) also cancels it
+  when the bias turns neutral.
+- New input `InpSwingMaxDistATR` (default 3.0): new orders only use swings within
+  that distance of price. Set from data: in the v1.14 runs, orders placed 3+ ATR
+  from price filled 0 of 49 times, versus 45-60% under 1 ATR.
+- Stop buffer left at 0.3 x ATR after studying the v1.14 trades (JOURNAL.md).
+  Replaying the orders on real M1 prices, every wider buffer lost more money
+  (0.3: +$38.61 over 25 trades; 0.5: -$10.94; 1.0: -$89.51): win rate barely
+  rose while each loss grew in proportion.
+- Swing mode logs kept orders and cancel reasons; `swing_log_summary.py` reports
+  them per run.
+- Tested on all 12 weeks with tick data (Jun 22 - Sep 11, $500, real ticks; see
+  JOURNAL.md): swing v1.15 made 77 trades, PF 0.72, -$55.80, 4 of 12 weeks
+  positive, worst weekly drawdown 4.8%; breakout mode on the same weeks made 943
+  trades, PF 0.93, -$300.18, 6 of 12 positive, worst weekly drawdown 50%. The
+  new order handling works (fill rate 12% -> 38.5%), but swing mode still loses:
+  34 of its 62 losing trades were stopped within 5 minutes of filling.
+
 ## [1.14] - 2026-09-15
 Optional swing-pullback entry mode, built from the user's manual trading method.
 

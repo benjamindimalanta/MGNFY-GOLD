@@ -480,3 +480,167 @@ the ~$53 margin floor of a $100 account can't cut weeks short. Only
   nearer swing to form (targets the far-away orders in finding 6).
 - **More weeks:** all 12 full weeks with tick data (from Jun 22) before
   reading anything into swing mode's PF (finding 3).
+
+
+---
+
+## 2026-09-15 -- Swing-mode stop buffer and order distance study (v1.14 data)
+
+**Why:** after the v1.14 comparison, the user asked to study the previous trades
+before widening swing mode's stop, and approved keeping orders longer and only
+using nearby swings (built as v1.15).
+
+**Method:** `study_swing_sl.py`. Inputs: every "Swing: placed" and "Swing bias"
+line from the 4 v1.14 swing runs in the tester agent log, the 20 real swing
+trades, and real XAUUSDm M1 bars from MT5 (Aug 9 - Sep 11). Orders are replayed
+on M1 bars: a buy limit fills when bid low + spread <= entry (the ask reaches
+it), a sell limit when bid high >= entry; then stop vs TP1, whichever price
+reaches first. A stop and TP1 in the same bar count as a loss, and only the stop
+is checked on the fill bar. ATR(M30) at placement is recovered from the logged
+risk (risk = 0.3 x ATR). Dollars at 0.01 lot (1 price unit = $1). "Kept" orders
+merge consecutive placements with the same direction and entry price into one
+order that lives until the bias flips or the level changes -- an approximation
+of v1.15's rule.
+
+**Calibration:** replaying the 164 as-run orders (each living one hour) finds
+**20 fills -- exactly the 20 trades the tester made.**
+
+### 1. Real trades: would a wider stop have kept the losers alive?
+
+"Against before TP1" = the furthest price moved against the trade (in ATR M30)
+before it reached TP1, or before the week ended if it never did.
+
+| Week | Entry time | Dir | Entry | P/L $ | Held (min) | Against before TP1 (ATR) | Later hit TP1 | Hours to TP1 |
+|---|---|---|---|---|---|---|---|---|
+| Aug 10 | 08-10 00:00 | BUY | 4332.71 | +3.06 | 33.6 | 1.73 | yes | 5.8 |
+| Aug 10 | 08-10 13:58 | BUY | 4317.37 | +32.09 | 153.1 | 0.09 | yes | 2.1 |
+| Aug 10 | 08-11 04:49 | BUY | 4407.78 | -3.79 | 6.2 | 4.18 | yes | 31.9 |
+| Aug 10 | 08-11 05:00 | BUY | 4407.83 | -4.04 | 5.0 | 3.81 | yes | 31.7 |
+| Aug 10 | 08-11 16:04 | BUY | 4381.07 | -3.73 | 87.6 | 1.77 | yes | 10.2 |
+| Aug 10 | 08-12 12:10 | BUY | 4406.86 | +20.24 | 19.1 | 0.22 | yes | 0.3 |
+| Aug 10 | 08-13 04:00 | BUY | 4398.11 | -3.76 | 10.1 | 7.00 | no | -- |
+| Aug 10 | 08-13 05:01 | BUY | 4396.01 | -0.48 | 31.1 | 6.71 | no | -- |
+| Aug 10 | 08-14 05:51 | SELL | 4328.12 | -3.59 | 4.7 | 5.79 | no | -- |
+| Aug 10 | 08-14 17:42 | BUY | 4378.64 | -4.54 | 62.8 | 0.65 | no | -- |
+| Aug 17 | 08-18 01:45 | BUY | 4409.72 | -2.71 | 1.8 | 9.37 | yes | 35.1 |
+| Aug 17 | 08-18 02:33 | BUY | 4397.77 | -3.02 | 6.7 | 7.16 | yes | 34.3 |
+| Aug 17 | 08-18 03:17 | BUY | 4397.81 | -3.04 | 6.4 | 7.31 | yes | 33.6 |
+| Aug 17 | 08-21 12:32 | BUY | 4577.75 | -3.99 | 2.7 | 1.09 | yes | 1.9 |
+| Aug 17 | 08-21 13:00 | BUY | 4577.82 | -4.11 | 34.9 | 0.34 | yes | 2.4 |
+| Aug 31 | 09-02 11:35 | SELL | 4331.72 | -3.34 | 29.2 | 17.37 | no | -- |
+| Sep 7 | 09-07 08:02 | SELL | 4413.46 | -3.63 | 1.0 | 0.88 | yes | 3.5 |
+| Sep 7 | 09-07 09:01 | SELL | 4413.40 | +20.72 | 188.8 | 0.05 | yes | 2.5 |
+| Sep 7 | 09-08 05:29 | BUY | 4421.06 | -3.47 | 26.4 | 11.31 | no | -- |
+| Sep 7 | 09-09 15:05 | BUY | 4390.66 | -3.97 | 0.1 | 1.16 | yes | 14.9 |
+
+16 losers; 10 of them reached TP1 later. The buffer each would have needed:
+0.34, 0.88, 1.09, 1.16, 1.77, 3.81, 4.18, 7.16, 7.31, 9.37 ATR. A ~1.2 ATR stop
+would have saved 4 of the 16; the other 6 went 3.8-9.4 ATR against the trade
+first and took ~30-35 hours to reach TP1 -- not realistically holdable.
+
+### 2. Stop-buffer replay (kept orders: 59 distinct, 25 filled)
+
+| Buffer (x ATR) | Trades | Skipped by R:R | Wins | Losses | Still open | Win% | Avg win $ | Avg loss $ | Net $ | Per trade $ | Median minutes to stop |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.30 | 25 | 0 | 2 | 22 | 1 | 8.0 | 31.03 | -3.38 | **+38.61** | +1.54 | 7 |
+| 0.50 | 25 | 0 | 2 | 22 | 1 | 8.0 | 31.03 | -5.63 | -10.94 | -0.44 | 23 |
+| 0.75 | 25 | 0 | 2 | 21 | 2 | 8.0 | 31.03 | -8.43 | -66.90 | -2.68 | 43 |
+| 1.00 | 25 | 0 | 3 | 20 | 2 | 12.0 | 28.66 | -11.18 | -89.51 | -3.58 | 46 |
+| 1.25 | 25 | 0 | 4 | 19 | 2 | 16.0 | 27.52 | -13.84 | -104.71 | -4.19 | 89 |
+| 1.50 | 23 | 2 | 5 | 16 | 2 | 21.7 | 26.94 | -16.58 | -82.46 | -3.59 | 100 |
+| 2.00 | 13 | 12 | 1 | 11 | 1 | 7.7 | 44.67 | -21.89 | -145.26 | -11.17 | 111 |
+| 3.00 | 11 | 14 | 1 | 8 | 2 | 9.1 | 44.67 | -31.84 | -170.81 | -15.53 | 358 |
+
+**Conclusion: a wider stop loses more money in this sample.** Wins barely
+increase (2 of 25 at 0.3, 3 at 1.0, 5 at 1.5) while every loss grows with the
+buffer. The stop stays at 0.3 x ATR. Caveats: 25 trades is small, and the replay
+counts a win as reaching TP1 -- the real EA can earn more after TP1 through the
+stairstep lock and trailing stop.
+
+### 3. Distance from price when placed vs fill rate
+
+| Distance (ATR M30) | As run (order lives 1 h): orders | filled | fill% | Kept orders: orders | filled | fill% |
+|---|---|---|---|---|---|---|
+| 0-1 | 29 | 13 | 44.8 | 15 | 9 | 60.0 |
+| 1-2 | 56 | 4 | 7.1 | 30 | 12 | 40.0 |
+| 2-3 | 30 | 3 | 10.0 | 13 | 4 | 30.8 |
+| 3-4 | 33 | 0 | 0.0 | 0 | 0 | -- |
+| 4-6 | 15 | 0 | 0.0 | 1 | 0 | 0.0 |
+| 6-10 | 1 | 0 | 0.0 | 0 | 0 | -- |
+
+**Conclusion:** orders 3+ ATR from price never filled (0 of 49 as run). Keeping
+orders raises the fill rate at every distance (1-2 ATR: 7% -> 40%). v1.15 sets
+`InpSwingMaxDistATR = 3.0` and keeps orders until the bias flips, the level
+changes, or price moves beyond that distance.
+
+
+---
+
+## 2026-09-15 -- v1.15 swing mode vs breakout mode, all 12 weeks, $500
+
+**Build:** v1.15 -- swing mode keeps its pending order across hourly checks and
+cancels it only when the bias flips, the swing level changes, or price moves more
+than 3 x ATR(M30) away; new orders only use swings within 3 x ATR. Stop buffer
+kept at 0.3 x ATR (see the study above).
+
+**Test:** `WEEKS=12 TAG=v115 python mt5_mode_compare.py` -- real MT5 Strategy
+Tester, real ticks, XAUUSDm, the user's inputs (H1 chart, `InpTF`=M15, fixed
+0.01 lot), every full Mon-Fri week with tick data from Jun 22 to Sep 11,
+**$500 deposit**, only `InpEntryMode` differs. Every trade:
+`mt5_modecompare_v115_12wk_trades.csv`. Order flow: `swing_log_summary.py`
+(the runs are in tester agent Agent-127.0.0.1-3001's log -- MT5 switched agents
+mid-session after the first agent's log reached 172 MB).
+
+| Week | Breakout trades | Breakout net $ | Breakout PF | Breakout max DD% | Swing trades | Swing net $ | Swing PF | Swing max DD% |
+|---|---|---|---|---|---|---|---|---|
+| Jun 22 | 82 | +64.36 | 1.15 | 16.7 | 5 | -0.07 | 1.00 | 2.4 |
+| Jun 29 | 71 | +43.49 | 1.14 | 19.7 | 6 | +17.52 | 2.79 | 1.0 |
+| Jul 6 | 82 | -222.05 | 0.48 | 50.0 | 7 | -14.21 | 0.30 | 2.8 |
+| Jul 13 | 79 | +61.65 | 1.20 | 19.5 | 8 | +1.74 | 1.10 | 2.0 |
+| Jul 20 | 87 | -150.14 | 0.57 | 31.6 | 4 | -11.29 | 0.00 | 2.3 |
+| Jul 27 | 72 | -92.64 | 0.68 | 26.4 | 9 | -10.80 | 0.54 | 4.6 |
+| Aug 3 | 78 | +100.84 | 1.29 | 15.2 | 4 | -9.24 | 0.00 | 1.9 |
+| Aug 10 | 80 | -58.01 | 0.85 | 27.9 | 10 | +9.68 | 1.37 | 4.8 |
+| Aug 17 | 71 | +5.52 | 1.02 | 23.2 | 6 | -19.98 | 0.00 | 4.0 |
+| Aug 24 | 77 | -15.54 | 0.96 | 23.2 | 8 | -19.78 | 0.15 | 4.1 |
+| Aug 31 | 85 | -43.60 | 0.89 | 23.6 | 3 | -2.93 | 0.55 | 0.7 |
+| Sep 7 | 79 | +5.94 | 1.02 | 17.8 | 7 | +3.56 | 1.21 | 2.6 |
+
+| 12 weeks | Trades | Trades/day | Win% | Net $ | PF | Avg win $ | Avg loss $ | Weeks + / - | Median loser hold |
+|---|---|---|---|---|---|---|---|---|---|
+| Breakout | 943 | 15.7 | 34.4 | -300.18 | 0.93 | 12.34 | -6.94 | 6 / 6 | 29 min |
+| Swing v1.15 | 77 | 1.3 | 19.5 | -55.80 | 0.72 | 9.66 | -3.24 | 4 / 8 | 5 min |
+
+**Swing v1.15 order flow (12 weeks):** 1,310 hourly bias checks -> BUY 231, SELL
+193, WAIT 886 (68%). 200 orders placed, kept at a check 259 times, **77 filled**,
+119 cancelled unfilled (swing level changed 64, too far from price 54, bias
+flipped 1). Skips: swing too far 75, spread too wide 18, reward < 1R 5. Fill
+rate 38.5% (v1.14: 12%).
+
+### Findings
+
+1. **Both modes lose over 12 weeks.** Breakout: PF 0.93, -$300.18, with swings
+   from +$100.84 to -$222.05 a week and up to 50% drawdown. Swing: PF 0.72,
+   -$55.80, but never more than 4.8% drawdown in a week.
+2. **v1.14's +$20.90 on 4 weeks did not hold.** On those same 4 weeks v1.15 made
+   -$9.67. Matching trades: v1.15 took 16 of v1.14's 20 trades with about the
+   same result (+$9.42 vs +$7.91), missed 4 worth +$12.99 (including a +$20.24
+   winner), and added 10 trades from orders kept open longer that netted -$19.09
+   (1 winner). Keeping orders raised fills, but the extra fills mostly lost.
+3. **The order handling itself behaves as designed** (259 keeps, 119 cancels
+   with logged reasons, fill rate 12% -> 38.5%).
+4. **The entry is the weak point.** 62 of 77 swing trades lost; 55 of them lost
+   about the full 1R, the median loser lasted 5 minutes, and 34 were stopped
+   within 5 minutes of filling. The limit order fills while price is pushing
+   through the swing, not bouncing off it -- and the study above showed a wider
+   stop only makes each of those losses bigger.
+5. **Winners still exist but are smaller than in v1.14:** 15 winners, avg $9.66
+   (v1.14: $19.03), 4 of them below 1R; 0 reached TP3.
+
+### Next test (not yet run)
+
+- **Confirmation entry instead of a blind limit order**, closer to the user's
+  final step ("go back to 5 mins and find where to enter"): when price reaches
+  the swing zone, wait for an M5 candle to close back on the bias side of the
+  level (a rejection) before entering, with the stop beyond that candle's wick.
+  Aimed at finding 4: the 34 trades stopped within 5 minutes.

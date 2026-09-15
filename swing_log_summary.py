@@ -1,17 +1,23 @@
-"""Summarize what swing-pullback mode did in each tester run, from the tester agent log.
+"""Summarize what swing-pullback mode did in each tester run, from the tester agent logs.
 
-Usage: python swing_log_summary.py HH:MM   (only runs that started at/after this real time today)
+Usage: python swing_log_summary.py HH:MM [HH:MM] [YYYYMMDD]
+  runs that started in this real-time window on that day (default: today's log files)
 
-Per run with InpEntryMode=1: bias checks and their outcome, orders placed / filled / cancelled,
-and every skip reason, plus a few sample placement lines to sanity-check prices.
+MT5 can switch to another local agent mid-session (e.g. when one agent's log grows very large), so
+every Agent-*/logs/<day>.log is read. Per run with InpEntryMode=1: bias checks and their outcome,
+orders placed / kept / filled / cancelled (with reasons), every skip reason, and sample placements.
 """
+import glob
+import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 
-AGENT_LOG = r"C:\Users\Benja\AppData\Roaming\MetaQuotes\Tester\53785E099C927DB68A545C249CDBCE06\Agent-127.0.0.1-3000\logs\20260915.log"
+TESTER_DIR = r"C:\Users\Benja\AppData\Roaming\MetaQuotes\Tester\53785E099C927DB68A545C249CDBCE06"
 
 SKIPS = {
+    "no swing within": "swing too far",
     "no usable swing": "no usable swing",
     "Swing: skip, reward": "reward < min R:R",
     "Swing: skip, free margin": "free margin",
@@ -23,9 +29,8 @@ SKIPS = {
 }
 
 
-def main():
-    since = sys.argv[1] if len(sys.argv) > 1 else "00:00"
-    text = open(AGENT_LOG, encoding="utf-16", errors="replace").read()
+def parse_log(path, since, until):
+    text = open(path, encoding="utf-16", errors="replace").read()
     runs, cur = [], None
     for raw in text.splitlines():
         f = raw.split("\t")
@@ -33,25 +38,31 @@ def main():
             continue
         rt, msg = f[2], f[4]
         if "testing of" in msg and "started with inputs" in msg:
-            m = re.search(r"from (\d{4}\.\d{2}\.\d{2})", msg)
-            cur = {"start": rt, "from": m.group(1) if m else "?", "mode": None, "bias": Counter(),
-                   "placed": 0, "cancelled": 0, "triggered": 0, "skips": Counter(), "samples": []}
-            if rt >= since:
+            m = re.search(r",(\w+): testing of .* from (\d{4}\.\d{2}\.\d{2})", msg)
+            cur = {"start": rt, "tf": m.group(1) if m else "?", "from": m.group(2) if m else "?", "mode": None,
+                   "bias": Counter(), "placed": 0, "kept": 0, "cancelled": 0, "cancel_reasons": Counter(),
+                   "triggered": 0, "skips": Counter(), "samples": []}
+            if since <= rt[:5] <= until:
                 runs.append(cur)
             continue
-        if cur is None or rt < since:
+        if cur is None:
             continue
-        if msg.strip().startswith("InpEntryMode="):
-            cur["mode"] = msg.strip().split("=", 1)[1]
+        s = msg.strip()
+        if s.startswith("InpEntryMode="):
+            cur["mode"] = s.split("=", 1)[1]
         elif "Swing bias:" in msg:
             b = re.search(r"-> (-?\d)", msg)
             cur["bias"][{"1": "BUY", "-1": "SELL", "0": "WAIT"}.get(b.group(1) if b else "", "?")] += 1
         elif "Swing: placed" in msg:
             cur["placed"] += 1
             if len(cur["samples"]) < 3:
-                cur["samples"].append(msg.strip())
+                cur["samples"].append(s)
+        elif "Swing: keeping pending" in msg:
+            cur["kept"] += 1
         elif "Swing: cancelled unfilled" in msg:
             cur["cancelled"] += 1
+            r = re.search(r"\(([^)]+)\)\s*$", msg)
+            cur["cancel_reasons"][r.group(1) if r else "hourly re-plan"] += 1
         elif re.search(r"(buy|sell) limit .*triggered", msg):
             cur["triggered"] += 1
         else:
@@ -59,17 +70,29 @@ def main():
                 if key in msg:
                     cur["skips"][label] += 1
                     break
+    return runs
+
+
+def main():
+    since = sys.argv[1] if len(sys.argv) > 1 else "00:00"
+    until = sys.argv[2] if len(sys.argv) > 2 else "99:99"
+    day = sys.argv[3] if len(sys.argv) > 3 else datetime.now().strftime("%Y%m%d")
+    runs = []
+    for path in sorted(glob.glob(os.path.join(TESTER_DIR, "Agent-*", "logs", f"{day}.log"))):
+        runs += parse_log(path, since, until)
+    runs.sort(key=lambda r: r["start"])
 
     swing_runs = [r for r in runs if r["mode"] == "1"]
-    print(f"runs since {since}: {len(runs)} total, {len(swing_runs)} in swing mode\n")
+    print(f"runs started {since}-{until} on {day}: {len(runs)} total, {len(swing_runs)} in swing mode\n")
     for r in swing_runs:
         checks = sum(r["bias"].values())
-        print(f"week from {r['from']} (started {r['start']}): {checks} bias checks -> "
+        print(f"week from {r['from']} ({r['tf']} chart, started {r['start']}): {checks} bias checks -> "
               f"BUY {r['bias']['BUY']}, SELL {r['bias']['SELL']}, WAIT {r['bias']['WAIT']}")
-        print(f"  orders placed {r['placed']}, filled {r['triggered']}, cancelled unfilled {r['cancelled']}")
+        print(f"  orders placed {r['placed']}, kept at a check {r['kept']}, filled {r['triggered']}, "
+              f"cancelled unfilled {r['cancelled']} {dict(r['cancel_reasons']) if r['cancel_reasons'] else ''}")
         print(f"  skips: {dict(r['skips']) if r['skips'] else 'none'}")
-        for s in r["samples"]:
-            print(f"  sample: {s}")
+        for smp in r["samples"]:
+            print(f"  sample: {smp}")
         print()
 
 

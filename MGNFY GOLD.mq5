@@ -50,9 +50,15 @@
 //|  by a fraction of ATR, TP1 at the opposite swing, TP2/TP3 from   |
 //|  the stored risk distance. Default mode is unchanged.            |
 //+------------------------------------------------------------------+
+//| v1.15 (2026-09-15): swing mode keeps its pending order across    |
+//|  hourly checks; it is cancelled only when the bias flips (or     |
+//|  turns neutral, if InpSwingCancelOnWait), the swing level it     |
+//|  sits on changes, or price is more than InpSwingMaxDistATR x ATR |
+//|  away. New orders only use swings within that distance.          |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.14"
+#property version   "1.15"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -115,6 +121,8 @@ input ENUM_TIMEFRAMES InpSwingTF       = PERIOD_M30;      // Swing mode: timefra
 input int      InpSwingStrength        = 2;               // Swing mode: bars on each side that define a swing high/low
 input double   InpSwingSLBufferATR     = 0.3;             // Swing mode: SL beyond the entry swing by this x ATR(swing TF)
 input double   InpSwingMinRR           = 1.0;             // Swing mode: skip if TP1 distance < this x SL distance
+input double   InpSwingMaxDistATR      = 3.0;             // Swing mode: only use swings within this x ATR(swing TF) of price (0 = no limit)
+input bool     InpSwingCancelOnWait    = false;           // Swing mode: also cancel the pending order when the bias turns neutral
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
@@ -749,59 +757,112 @@ double SwingLots(double entry, double sl, ENUM_ORDER_TYPE ot)
   return AdjustLotsByMargin(lots, entry, ot);
 }
 
-// Called once per new H1 bar while flat: cancel the unfilled order from the last check, then place a
-// fresh limit order at the M30 swing in the bias direction.
-void PlanSwingEntry(int bias, bool filtersPass)
+// Works out the limit order the current bias calls for: the most recent swing on the right side of price
+// and within InpSwingMaxDistATR x ATR of it, SL beyond it, TP1 at the opposite swing. Returns false (and
+// logs why) when there is none.
+bool BuildSwingPlan(int bias, double atr, double &entry, double &sl, double &tp1)
 {
-  ulong stale = FindPendingOrder();
-  if(stale != 0)
-  {
-    if(Trade.OrderDelete(stale)) PrintFormat("Swing: cancelled unfilled pending #%I64u at bias re-check", stale);
-    else PrintFormat("Swing: could not cancel pending #%I64u rc=%d", stale, (int)Trade.ResultRetcode());
-  }
-  PrintFormat("Swing bias: M30=%d H1=%d H4=%d -> %d (need %d agreeing)", g_biasTF[0], g_biasTF[1], g_biasTF[2], bias, InpBiasMinAgree);
-  if(bias == 0 || !filtersPass) return;
-
   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
   double minDist = (GetStopsLevelPoints() + 2) * SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-  double atr[1];
-  if(hSwingATR == INVALID_HANDLE || CopyBuffer(hSwingATR, 0, 1, 1, atr) != 1 || atr[0] <= 0.0)
-  {
-    Print("Swing: ATR not ready");
-    return;
-  }
-  double buffer = MathMax(InpSwingSLBufferATR * atr[0], minDist);
+  double maxDist = (InpSwingMaxDistATR > 0.0 ? InpSwingMaxDistATR * atr : DBL_MAX);
+  double buffer = MathMax(InpSwingSLBufferATR * atr, minDist);
 
   double lows[], highs[];
   int nl = FindSwings(InpSwingTF, false, InpSwingStrength, 10, lows);
   int nh = FindSwings(InpSwingTF, true, InpSwingStrength, 10, highs);
-  double entry = 0.0, sl = 0.0, tp1 = 0.0;
+  entry = 0.0;
+  sl = 0.0;
+  tp1 = 0.0;
+  bool sawFar = false;
   if(bias > 0)
   {
-    for(int i = 0; i < nl && entry == 0.0; i++) if(lows[i] < ask - minDist) entry = lows[i];
+    for(int i = 0; i < nl && entry == 0.0; i++)
+    {
+      if(lows[i] >= ask - minDist) continue;
+      if(ask - lows[i] > maxDist) { sawFar = true; continue; }
+      entry = lows[i];
+    }
     if(entry > 0.0)
       for(int i = 0; i < nh && tp1 == 0.0; i++) if(highs[i] > entry + minDist) tp1 = highs[i];
     sl = entry - buffer;
   }
   else
   {
-    for(int i = 0; i < nh && entry == 0.0; i++) if(highs[i] > bid + minDist) entry = highs[i];
+    for(int i = 0; i < nh && entry == 0.0; i++)
+    {
+      if(highs[i] <= bid + minDist) continue;
+      if(highs[i] - bid > maxDist) { sawFar = true; continue; }
+      entry = highs[i];
+    }
     if(entry > 0.0)
       for(int i = 0; i < nl && tp1 == 0.0; i++) if(lows[i] < entry - minDist) tp1 = lows[i];
     sl = entry + buffer;
   }
-  if(entry <= 0.0 || tp1 <= 0.0)
+  if(entry <= 0.0)
   {
-    PrintFormat("Swing: no usable swing for %s (entry=%.2f tp1=%.2f)", bias > 0 ? "BUY" : "SELL", entry, tp1);
-    return;
+    if(sawFar) PrintFormat("Swing: no swing within %.1f x ATR (%.2f) of price for %s", InpSwingMaxDistATR, maxDist, bias > 0 ? "BUY" : "SELL");
+    else PrintFormat("Swing: no usable swing for %s", bias > 0 ? "BUY" : "SELL");
+    return false;
+  }
+  if(tp1 <= 0.0)
+  {
+    PrintFormat("Swing: no usable swing for %s TP1 (entry=%.2f)", bias > 0 ? "BUY" : "SELL", entry);
+    return false;
   }
   double risk = MathAbs(entry - sl), reward = MathAbs(tp1 - entry);
   if(reward < InpSwingMinRR * risk)
   {
     PrintFormat("Swing: skip, reward %.2f < %.2f x risk %.2f", reward, InpSwingMinRR, risk);
+    return false;
+  }
+  entry = NormalizeDouble(entry, _Digits);
+  sl = NormalizeDouble(sl, _Digits);
+  return true;
+}
+
+// Called once per new H1 bar while flat. An existing pending order is kept unless the bias has flipped
+// (or turned neutral, with InpSwingCancelOnWait), price has moved more than InpSwingMaxDistATR x ATR away
+// from it, or the swing level for the same direction has changed. Then a new limit order is placed if the
+// bias calls for one and there is no order left.
+void PlanSwingEntry(int bias, bool filtersPass)
+{
+  PrintFormat("Swing bias: M30=%d H1=%d H4=%d -> %d (need %d agreeing)", g_biasTF[0], g_biasTF[1], g_biasTF[2], bias, InpBiasMinAgree);
+  double atr[1];
+  if(hSwingATR == INVALID_HANDLE || CopyBuffer(hSwingATR, 0, 1, 1, atr) != 1 || atr[0] <= 0.0)
+  {
+    Print("Swing: ATR not ready");
     return;
   }
+  double entry = 0.0, sl = 0.0, tp1 = 0.0;
+  bool havePlan = (bias != 0 && BuildSwingPlan(bias, atr[0], entry, sl, tp1));
+
+  ulong pending = FindPendingOrder();
+  if(pending != 0 && OrderSelect(pending))
+  {
+    int pendDir = (OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT ? 1 : -1);
+    double pendPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+    double price = (pendDir > 0 ? SymbolInfoDouble(InpSymbol, SYMBOL_ASK) : SymbolInfoDouble(InpSymbol, SYMBOL_BID));
+    string why = "";
+    if(bias == -pendDir) why = "bias flipped";
+    else if(bias == 0 && InpSwingCancelOnWait) why = "bias turned neutral";
+    else if(InpSwingMaxDistATR > 0.0 && MathAbs(price - pendPrice) > InpSwingMaxDistATR * atr[0]) why = "too far from price";
+    else if(bias == pendDir && havePlan && MathAbs(entry - pendPrice) >= _Point) why = "swing level changed";
+    if(why == "")
+    {
+      if(g_planSL <= 0.0) g_planSL = OrderGetDouble(ORDER_SL);  // e.g. after an EA restart
+      PrintFormat("Swing: keeping pending #%I64u @ %.2f", pending, pendPrice);
+      return;
+    }
+    if(!Trade.OrderDelete(pending))
+    {
+      PrintFormat("Swing: could not cancel pending #%I64u rc=%d", pending, (int)Trade.ResultRetcode());
+      return;
+    }
+    PrintFormat("Swing: cancelled unfilled pending #%I64u (%s)", pending, why);
+  }
+
+  if(!havePlan || !filtersPass) return;
   ENUM_ORDER_TYPE ot = (bias > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
   double lots = SwingLots(entry, sl, ot);
   if(lots <= 0.0)
@@ -809,8 +870,6 @@ void PlanSwingEntry(int bias, bool filtersPass)
     Print("Swing: skip, not enough margin for the minimum lot");
     return;
   }
-  entry = NormalizeDouble(entry, _Digits);
-  sl = NormalizeDouble(sl, _Digits);
   Trade.SetAsyncMode(false);
   bool ok = (bias > 0)
             ? Trade.BuyLimit(lots, entry, InpSymbol, sl, 0.0, ORDER_TIME_GTC, 0, "SwingPullbackBuy")
@@ -826,7 +885,7 @@ void PlanSwingEntry(int bias, bool filtersPass)
   tp2Hit = false;
   lastTicket = 0;
   PrintFormat("Swing: placed %s LIMIT %.2f lots @ %.2f sl=%.2f tp1=%.2f (risk %.2f, reward %.2f)",
-              bias > 0 ? "BUY" : "SELL", lots, entry, sl, tp1, risk, reward);
+              bias > 0 ? "BUY" : "SELL", lots, entry, sl, tp1, MathAbs(entry - sl), MathAbs(tp1 - entry));
 }
 
 // Swing-mode targets from the stored plan: R = distance from the actual fill to the planned SL, TP1 = the
