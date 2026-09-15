@@ -50,7 +50,7 @@
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
 #property description "Management: optional ATR trailing; spread/margin/session filters."
 #property description "Trend filter: higher‑timeframe EMA (+ optional slope)."
-#property description "HUD: dark gold-accent tabbed panel -- Stats (balance/equity/P&L/win-rate/PF/drawdown/open position) and a Risk Calculator (editable entry/lot/TP/SL, computed $ gain/loss and R:R)."
+#property description "HUD: tabbed panel -- live stats and a risk calculator."
 #property description "Optional small-account mode: partial capture + BE buffer."
 #include <Trade/Trade.mqh>
 CTrade Trade;
@@ -365,6 +365,22 @@ void CleanupOldVisuals(int posDir)
     if(ObjectFind(0, tradeLines[i]) != -1) ObjectDelete(0, tradeLines[i]);
 }
 
+// Builds before v1.13 named these lines "TP1_<bartime>" etc. and never removed them, so a chart
+// (or a tester visualization template) can still be carrying hundreds of them. Prefix match
+// catches both the old suffixed names and the current fixed ones. Called once from OnInit.
+void PurgeTradeLineObjects()
+{
+  string prefixes[] = {"Entry", "SL", "TP1", "TP2", "TP3", "CloudHigh", "CloudLow"};
+  for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; --i)
+  {
+    string obj = ObjectName(0, i, -1, -1);
+    for(int p = 0; p < ArraySize(prefixes); p++)
+    {
+      if(StringFind(obj, prefixes[p]) == 0) { ObjectDelete(0, obj); break; }
+    }
+  }
+}
+
 bool ClosePartial(ulong ticket, double frac)
 {
   if(!PositionSelectByTicket(ticket)) return false;
@@ -563,10 +579,12 @@ void HUD_Rect(string name, int x, int y, int w, int h, color bg, color border)
   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
   ObjectSetInteger(0, name, OBJPROP_XSIZE, (long)w);
   ObjectSetInteger(0, name, OBJPROP_YSIZE, (long)h);
-  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)border);
-  #ifdef OBJPROP_BGCOLOR
+  // No #ifdef here: OBJPROP_BGCOLOR is an enum value, not a preprocessor macro, so the old
+  // "#ifdef OBJPROP_BGCOLOR" guard was always false and silently compiled this line out --
+  // leaving every panel on MT5's default light background with light-gray text on top of it.
   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, (long)bg);
-  #endif
+  ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, (long)BORDER_FLAT);
+  ObjectSetInteger(0, name, OBJPROP_COLOR, (long)border);
   ObjectSetInteger(0, name, OBJPROP_WIDTH, (long)1);
   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
 }
@@ -579,12 +597,10 @@ void HUD_Label(string name, int x, int y, string text, color clr, int fontSize, 
   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, (long)y);
   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, (long)fontSize);
-  #ifdef OBJPROP_BOLD
-  ObjectSetInteger(0, name, OBJPROP_BOLD, (long)bold);
-  #endif
-  ObjectSetString(0, name, OBJPROP_FONT, "Segoe UI");
+  // MQL5 has no bold property for labels; weight comes from the font face itself.
+  ObjectSetString(0, name, OBJPROP_FONT, bold ? "Segoe UI Semibold" : "Segoe UI");
   ObjectSetInteger(0, name, OBJPROP_COLOR, (long)clr);
-  ObjectSetString(0, name, OBJPROP_TEXT, text);
+  ObjectSetString(0, name, OBJPROP_TEXT, text == "" ? " " : text); // "" would render as "Label"
 }
 
 void HUD_Button(string name, int x, int y, int w, int h, string text, color bg, color fg, int fontSize)
@@ -695,11 +711,14 @@ double HUD_CalcProfit(bool isBuy, double lots, double openPrice, double closePri
 }
 
 //========================================= EnsureHUD =========================================
-// Builds every object exactly once (all static layout: position/size/font/color). Called every
-// OnTick() like the old EnsureStatsLabel() was, but the ObjectFind guard inside each helper means
-// after the first call this is just a cheap no-op loop of ObjectFind() checks.
+// Builds the static layout once. It used to re-run the whole build on every tick, which reset
+// every value label to "" (MT5 renders an empty label as the placeholder "Label") and re-applied
+// tab colors/visibility several times a second -- that was the blinking. Now it returns early
+// once built, and only rebuilds if the panel has been removed (e.g. objects deleted manually).
 void EnsureHUD()
 {
+  if(g_hudBuilt && ObjectFind(0, HUD_PREFIX + "BG") >= 0) return;
+
   int x = HUD_PanelX, w = HUD_PanelW;
   int pad = 14;
   int innerX = x + pad;
@@ -708,7 +727,7 @@ void EnsureHUD()
   HUD_Rect(HUD_PREFIX + "BG", x, HUD_PanelY, w, HUD_PanelH, HUD_BG, HUD_BORDER);
 
   int y = HUD_PanelY + 12;
-  HUD_Label(HUD_PREFIX + "TITLE", innerX, y, "MGNFY GOLD", HUD_HEADER, 15, true); y += 20;
+  HUD_Label(HUD_PREFIX + "TITLE", innerX, y, "MGNFY GOLD", HUD_HEADER, 15, true); y += 24;
   HUD_Label(HUD_PREFIX + "SUB", innerX, y, "", HUD_SUBTEXT, 9, false); y += 22;
 
   // Tab buttons
@@ -881,8 +900,8 @@ void UpdateStatsTab()
   {
     ObjectSetString(0, HUD_PREFIX + "S_POS1", OBJPROP_TEXT, "No open position");
     ObjectSetInteger(0, HUD_PREFIX + "S_POS1", OBJPROP_COLOR, (long)HUD_SUBTEXT);
-    ObjectSetString(0, HUD_PREFIX + "S_POS2", OBJPROP_TEXT, "");
-    ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT, "");
+    ObjectSetString(0, HUD_PREFIX + "S_POS2", OBJPROP_TEXT, " ");
+    ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT, " ");
   }
 
   int spread = (int)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD);
@@ -949,6 +968,12 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
   }
 }
 
+// Minimum SL change worth sending to the broker (500 points = 0.50 on XAUUSDm). The ATR trail
+// used to fire a modify request on nearly every tick for sub-cent moves -- visible in tester
+// logs as dozens of "modify position" lines per minute -- which lags visual mode and is the kind
+// of request volume a live broker can throttle. Stairstep/BE moves are far larger than this.
+#define TRAIL_MIN_STEP_POINTS 500
+
 void MoveSLto(double slNew)
 {
   if(!PositionSelect(InpSymbol)) return;
@@ -958,6 +983,8 @@ void MoveSLto(double slNew)
   double currentTP = PositionGetDouble(POSITION_TP);
   double clamped = ClampSLForModify(type, slNew);
   if(clamped <= 0.0) return; // broker would reject
+  if(currentSL > 0.0 && MathAbs(clamped - currentSL) < TRAIL_MIN_STEP_POINTS * SymbolInfoDouble(InpSymbol, SYMBOL_POINT))
+    return;
   double pt = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
   if(currentSL > 0.0 && MathAbs(clamped - currentSL) <= 0.5*pt) return; // no effective change
   Trade.PositionModify(InpSymbol, clamped, currentTP);
@@ -980,6 +1007,7 @@ double NormalizeLotsToSymbol(double desiredLots)
 int OnInit()
 {
   Trade.SetExpertMagicNumber(InpMagic);
+  PurgeTradeLineObjects();
   if(!EnsureHandles()) return(INIT_FAILED);
   // initialize stats baseline
   string gname = StatsGlobalName();
@@ -1502,6 +1530,9 @@ void OnDeinit(const int reason)
   if(hEMALow != INVALID_HANDLE)   { IndicatorRelease(hEMALow); hEMALow = INVALID_HANDLE; }
   if(hTrendEMA != INVALID_HANDLE) { IndicatorRelease(hTrendEMA); hTrendEMA = INVALID_HANDLE; }
   
+  PrintFormat("Deinit: %d horizontal-line objects on chart (expected at most 5: Entry/SL/TP1-3)",
+              ObjectsTotal(0, -1, OBJ_HLINE));
+
   // Cleanup HUD objects -- every HUD object uses this prefix, so one call catches all of them
   // (including anything a future edit adds, without needing to keep this list in sync by hand).
   ObjectsDeleteAll(0, HUD_PREFIX);

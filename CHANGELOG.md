@@ -41,6 +41,47 @@ could visually cut through it.
   clears the trade lines once flat instead of sweeping by bar age.
   `InpVisualKeepBars` is unused as of this fix (kept only so old presets
   referencing it still load without error).
+- **Startup sweep**: `OnInit()` now deletes any leftover Entry/SL/TP/Cloud
+  line objects by name prefix, so charts that already carry hundreds of
+  old `TP1_<bartime>` objects from earlier builds get cleaned on attach.
+  `OnDeinit()` logs the remaining horizontal-line count as a check — the
+  verification run below logged `0`.
+- **Trailing stop no longer spams the broker**: the ATR trail sent a
+  modify request on nearly every tick for sub-cent moves. `MoveSLto()` now
+  skips changes smaller than 500 points (0.50 on XAUUSDm). Measured over
+  the same simulated window (2026-09-07 00:00 to 09-08 06:30, H1, real
+  ticks): **2,756 modify requests before, 232 after.** Stairstep/BE moves
+  are far larger than the threshold and unaffected. Trailing now moves in
+  coarser steps, so backtest numbers can shift slightly — rerun the
+  journal before comparing against earlier batches.
+- **HUD background/font bug**: the panel helpers wrapped the
+  background-color call in `#ifdef OBJPROP_BGCOLOR` (inherited from the
+  original code). That's an enum value, not a macro, so the line was
+  always compiled out — panels stayed on MT5's default light background
+  and the light-gray text was nearly unreadable. Same issue with
+  `#ifdef OBJPROP_BOLD` (MQL5 has no such property). Both removed; bold
+  now comes from the font face.
+- Shortened the HUD `#property description` (compiler warning 47:
+  description too long). Builds with 0 errors, 0 warnings.
+- **HUD blinking fixed** (reported by the user): `EnsureHUD()` rebuilt the
+  whole layout on every tick, resetting each value label to `""` — which
+  MT5 renders as the placeholder text `Label` — before the update wrote
+  the real value back, and re-applied tab colors/visibility each time. A
+  tester-window capture caught every value reading "Label". Now the
+  layout builds once (rebuilds only if the panel objects are removed),
+  and empty labels are written as a space so they never show the
+  placeholder. Verified with four HUD captures 0.5s apart mid-trade.
+- **Evidence the v1.12 take-profit fix works in real MT5**: in the
+  verification run (XAUUSDm, 2026-09-07 to 09-11, real ticks, user's
+  inputs), 7 of 57 trades closed with an empty exit comment — the
+  signature of the TP3 `PositionClose()` — all winners at +1.3R to +3.3R.
+  The v1.11 journal batch recorded zero TP exits in 481 trades. Note the
+  R spread: TP1-TP3 are recomputed from the *current* bar's ATR on every
+  tick rather than fixed at entry, so the TP3 distance drifts while a
+  trade is open — worth a deliberate decision before tuning exits.
+- Verified by compiling with MetaEditor and running Strategy Tester visual
+  mode directly (2026-09-07 to 09-11, XAUUSDm H1, the user's exact inputs),
+  with screenshots, rather than inferring from code alone.
 
 ## [1.12] - 2026-09-15
 Backtested against 2 years of real XAUUSDm broker data before shipping —
