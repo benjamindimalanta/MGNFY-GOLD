@@ -36,10 +36,15 @@ FIDELITY NOTES — read before trusting the numbers
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 
-DATA_DIR = r"D:\EA Robot\MGNFY_GOLD_LIVE\data"
+# 2026-09-15: was hardcoded to a machine-specific D:\ path from a prior session
+# that no longer exists on this machine. Resolved relative to this file so the
+# repo works from any clone/checkout.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
 def load(name):
