@@ -17,11 +17,17 @@ could visually cut through it.
   price / SL price; computes real $ gain at TP and $ loss at SL via the
   broker's own `OrderCalcProfit()` (not hand-rolled pip math), plus the
   resulting risk:reward ratio.
-- **Root cause of "blocked by the chart" fixed**: every HUD object now
-  gets an explicit z-order above the EA's own Entry/SL/TP price lines
-  (`OBJ_HLINE`, price-anchored, span the full chart width) — at whatever
-  y-pixel those lines land on screen they could previously render on top
-  of the panel and cut through it. Not a color/transparency issue.
+- **Lines drawn across the HUD — first attempt was wrong, now fixed**: the
+  original change set a high `OBJPROP_ZORDER` on HUD objects and claimed that
+  kept them above the Entry/SL/TP lines. It doesn't: in MQL5 `OBJPROP_ZORDER`
+  is click-event priority only. MT5 draws foreground objects in creation
+  order, and the lines are created after the HUD, so they still cut across
+  it (user screenshot, M5 tester run). Fixed by drawing the EA's lines in the
+  background layer (`OBJPROP_BACK=true`): behind candles and behind the HUD.
+- **HUD cut off in tester visual mode**: the tester auto-added the EA's ATR,
+  MACD and EMA indicators, and their sub-windows shrank the main chart below
+  the panel's height. `OnInit()` now calls `TesterHideIndicators(true)` before
+  creating indicator handles. Tester-only; no effect on live charts.
 - Dark, high-contrast, gold-accent theme, replacing a plain white panel
   that didn't match the file's own long-standing "dark-themed HUD"
   description.

@@ -35,12 +35,11 @@
 //|  3. Dark, high-contrast, gold-accent theme (previous panel was a  |
 //|     plain white box, which the file's own #property description  |
 //|     had claimed was "dark-themed" without actually being so).     |
-//|  4. Every HUD object now gets an explicit high z-order so it      |
-//|     always renders above the EA's own Entry/SL/TP price lines     |
-//|     (OBJ_HLINE) -- those are price-anchored and span the full     |
-//|     chart width, so at whatever y-pixel their price lands on      |
-//|     screen they could previously render on top of the             |
-//|     screen-anchored HUD panel and visually cut through it.        |
+//|  4. Entry/SL/TP lines are drawn in the chart background so they  |
+//|     no longer cut across the HUD (MT5 draws foreground objects   |
+//|     in creation order; OBJPROP_ZORDER is click priority only).   |
+//|     Tester visual mode no longer adds indicator sub-windows,     |
+//|     which had shrunk the chart and cut off the bottom of the HUD.|
 //+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
@@ -144,11 +143,9 @@ bool   smallProfitTaken = false; // per-trade flag for small-account partial cap
 //-------------------- HUD v2 (tabbed panel: Stats / Risk Calculator) ---------------------
 // 2026-09-15: full HUD rewrite. Every object below uses the HUD_PREFIX naming convention so
 // OnDeinit can clean up with a single ObjectsDeleteAll(0, HUD_PREFIX) instead of a hand-kept
-// list, and every object gets HUD_Z as its z-order so the panel always renders ABOVE the EA's
-// own Entry/SL/TP price lines (OBJ_HLINE, drawn by DrawLine() below -- those are price-anchored
-// and span the full chart width, so at whatever y-pixel their price lands on screen they were
-// previously able to render on top of the screen-anchored HUD panel and cut through it, which is
-// what "blocked by the chart" was -- not a transparency/color problem, a z-order one).
+// list. HUD_Z is the objects' click priority (so the tab buttons win clicks); it does NOT
+// affect what is drawn on top. Keeping the Entry/SL/TP lines off the panel is done in
+// DrawLine() by putting those lines in the background layer.
 #define HUD_PREFIX "MSB_HUD_"
 #define HUD_Z      500
 int      g_hudTab      = 0;    // 0 = Stats tab, 1 = Risk Calculator tab
@@ -344,6 +341,12 @@ void DrawLine(const string name, double price, color clr)
     ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
     ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
     ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+    // Background layer: MT5 draws foreground objects in creation order, and these lines are
+    // created after the HUD, so in the foreground they were drawn straight across the panel.
+    // In the background they sit behind candles and behind every foreground object (the HUD).
+    ObjectSetInteger(0, name, OBJPROP_BACK, (long)true);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, (long)false);
+    ObjectSetInteger(0, name, OBJPROP_HIDDEN, (long)true);
   }
   else
   {
@@ -567,7 +570,7 @@ void HUD_ApplyCommon(string name)
 {
   ObjectSetInteger(0, name, OBJPROP_CORNER, (long)CORNER_LEFT_UPPER);
   ObjectSetInteger(0, name, OBJPROP_BACK, (long)false);       // foreground: draws above candles/indicators
-  ObjectSetInteger(0, name, OBJPROP_ZORDER, (long)HUD_Z);     // draws above the EA's own Entry/SL/TP lines too
+  ObjectSetInteger(0, name, OBJPROP_ZORDER, (long)HUD_Z);     // click priority only -- does not change drawing order
   ObjectSetInteger(0, name, OBJPROP_HIDDEN, (long)true);      // keep it out of the Object List, not off-chart
 }
 
@@ -1007,6 +1010,9 @@ double NormalizeLotsToSymbol(double desiredLots)
 int OnInit()
 {
   Trade.SetExpertMagicNumber(InpMagic);
+  // Strategy Tester only: don't auto-add the EA's ATR/MACD/EMA indicators to the visual chart.
+  // Their sub-windows shrank the main chart and cut the HUD off. Must run before handles exist.
+  TesterHideIndicators(true);
   PurgeTradeLineObjects();
   if(!EnsureHandles()) return(INIT_FAILED);
   // initialize stats baseline
