@@ -24,6 +24,9 @@ SKIPS = {
     "Swing: skip, spread": "spread too wide",
     "Swing: skip, outside session": "outside session",
     "Swing: skip, not enough margin": "lot/margin",
+    "Swing: skip, lot size": "lot size (margin or max risk)",
+    "Swing: skip, minimum lot risks": "min lot above max risk %",
+    "Swing: skip, outside trade windows": "outside trade windows",
     "Swing: order failed": "order failed",
     "Swing: ATR not ready": "ATR not ready",
 }

@@ -2,6 +2,47 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.17] - 2026-09-15
+User-approved defaults and exit/session experiments, review round 2
+(`reviews/2026-09-15-pro-trader-review-round2.md`). The new defaults are risk controls, not a
+claim of edge.
+
+- **Default entry mode is now swing pullback** (`InpEntryMode`), **with the M5 confirmation
+  entry** (`InpSwingEntryStyle`; round 1: +0.02R vs -0.23R per trade for limit orders on the same
+  weeks, neither proven).
+- **Risk sizing on by default at 1%** (`InpUseRiskSizing=true`, `InpRiskPercent=1.0`). The lot is
+  floored to the 0.01 step, so risk stays at or below 1%, except when it has to be raised to the
+  0.01 minimum lot: then the trade is skipped if that lot would risk more than the new
+  `InpMaxRiskPercent` (default 1.5%). Applies to both entry modes.
+- **Equity guard** (`InpUseEquityGuard=true`, `InpEquityGuardPct=10`, `InpEquityGuardDays=7`): no
+  new entries while equity is 10% or more below its highest value of the last 7 days (hourly
+  buckets, rebuilt from deal history on restart). Pending orders are cancelled and armed levels
+  dropped while it is active; open trades keep their stops; entries resume once equity is back
+  inside the limit or the old peak leaves the window. Its log is limited to one line per minute
+  (with a trade open, equity can cross the limit tick after tick: 152 lines in one test week
+  before, 14 after, same trades). Verified in the tester with a 1% / 1-day setting: paused, skipped
+  46 hourly checks, resumed when the peak aged out. The 1.5% cap was verified at $500 (5 of 5
+  setups skipped with a log line each).
+- **No stop modifications while the market is closed** (`InpThrottleClosedMarket=true`): skipped
+  outside the symbol's trade sessions, plus a 60-second pause after a "market closed" rejection.
+  Jan 5-7 2026 run (breakout, the user's inputs): 7,811 rejected requests before, 0 after; the 28
+  trades and the final balance ($581.63) are identical.
+- New inputs, off by default: `InpExitAtTP1` (what the stop does at TP1/TP2: TP1 price as before,
+  breakeven + spread, or an M15 structure trail), `InpTrailATRTF` (ATR trailing timeframe),
+  `InpUseTradeWindows` / `InpTradeWindows` (entries only inside server-time windows; default text is
+  the user's hours, 06:00-10:00, 11:00-13:00, 15:00-17:00 UTC).
+- With v1.16-equivalent inputs, v1.17 reproduces the stored v1.15 trades exactly (Jul 6, both
+  modes).
+- Tools: `mt5_deep_parse.py` groups partial closes into one trade, computes R at the traded
+  volume (identical output on 0.01-lot reports) and reads numbers with thousand separators
+  ("5 080.46" used to become NaN) and handles reports with no trades; `mt5_mode_compare.py`
+  takes `DEPOSIT=`.
+- Tested on the 12 in-sample weeks at $5,000 and 1% risk (JOURNAL.md): new defaults (B2) 56
+  trades, +3.37R, +$115.35, PF 1.09, worst week -4.0%. Exits: breakeven at TP1 +2.62R (no
+  effect); M15 structure trail +19.27R and ATR trail on M30 +18.92R, but both from two or three
+  trending weeks and worse in most weeks (paired t 0.63 and 1.12), so not proven. User's trade
+  windows +0.97R on 27 trades (the removed trades were the better ones). None became a default.
+
 ## [1.16] - 2026-09-15
 Pro trader review, round 1 (`reviews/2026-09-15-pro-trader-review.md`). Default inputs keep
 v1.15 trading behavior.

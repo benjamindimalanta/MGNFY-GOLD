@@ -40,6 +40,19 @@ As the user described it (keep the EA aligned with this; it is the reason the ro
 Settings the user chose for the EA's swing mode: 2 of 3 timeframes must agree, EMA 50, entries at M30
 swings.
 
+Answers the user gave on 2026-09-15 (they refine points 7-10):
+- **Hours:** 10:00-14:00, 15:00-17:00 and 19:00-21:00 local time (UTC+4, no daylight saving) =
+  **06:00-10:00, 11:00-13:00, 15:00-17:00 UTC**: London morning, the hour before the US data window,
+  and the New York open. In the EA: `InpTradeWindows`.
+- **Risk:** 1% per trade; a "moving" weekly drawdown limit of 10%, implemented as no new entries while
+  equity is 10% or more below its rolling 7-day peak (interpretation). In the EA: `InpRiskPercent`,
+  `InpEquityGuardPct`, `InpEquityGuardDays`.
+- **News:** FOMC, NFP and CPI are traded, more carefully -- not avoided. A reduced-risk rule around
+  them is a future candidate (needs a schedule file for the tester).
+- **Exits:** left to evidence ("decide the best exit management").
+- **Manual trading:** not on the EA's account.
+- Wants swing mode as the EA's default.
+
 ## 2. How gold moves: sessions and daily rhythm
 
 | Window (UTC, summer) | Character | Implication |

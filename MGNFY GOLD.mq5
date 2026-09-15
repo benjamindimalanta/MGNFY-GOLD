@@ -68,9 +68,19 @@
 //|    the bias side, stop beyond the sweep.                          |
 //|  Defaults keep v1.15 behavior.                                    |
 //+------------------------------------------------------------------+
+//| v1.17 (2026-09-15): user-approved defaults, review round 2       |
+//|  - Swing pullback is the default entry mode, with the M5         |
+//|    confirmation entry; risk sizing on at 1% (a trade is skipped  |
+//|    if the minimum lot would risk more than InpMaxRiskPercent).    |
+//|  - Equity guard: no new entries while equity is 10% or more      |
+//|    below its rolling 7-day peak.                                 |
+//|  - No stop modifications while the trade session is closed.      |
+//|  - Selectable exit rule at TP1/TP2, ATR-trail timeframe and       |
+//|    trade windows (server time), off by default.                  |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.16"
+#property version   "1.17"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -91,6 +101,13 @@ enum ENUM_SWING_ENTRY_STYLE
 {
   SWING_LIMIT_AT_SWING  = 0, // Limit order at the swing (v1.15)
   SWING_CONFIRM_RECLAIM = 1  // Wait for a sweep of the swing and an M5 close back on the bias side
+};
+
+enum ENUM_TP1_EXIT
+{
+  EXIT_STOP_TO_TP1     = 0, // At TP1 the stop jumps to the TP1 price, at TP2 to the TP2 price (v1.12-v1.16)
+  EXIT_STOP_TO_BE      = 1, // At TP1 stop to breakeven + spread, at TP2 to the TP1 price
+  EXIT_STRUCTURE_TRAIL = 2  // From TP1 the stop trails the last closed M15 swing; no ATR trailing
 };
 
 //-------------------- Inputs --------------------
@@ -125,15 +142,16 @@ input double   InpSL_ATR_Mult          = 1.0;             // SL = k * ATR
 input double   InpTP1_R_Mult           = 1.0;             // TP1 = 1R
 input double   InpTP2_R_Mult           = 2.0;             // TP2 = 2R
 input double   InpTP3_R_Mult           = 3.0;             // TP3 = 3R
-input bool     InpUseRiskSizing        = false;           // Size lots by risk % of equity
+input bool     InpUseRiskSizing        = true;            // Size lots by risk % of equity (v1.17 default on)
 input double   InpRiskPercent          = 1.0;             // Risk percent of equity per trade
+input double   InpMaxRiskPercent       = 1.5;             // Risk sizing: skip a trade when even the minimum lot would risk more than this % of equity
 input bool     InpRequireTrendFlip     = false;           // If false, enter on direct band/midline break (more entries)
 input int      InpBreakoutConfirmBars  = 1;               // Bars to confirm breakout (1 = close1 inside, close0 outside)
 input bool     InpUseMidlineBreakout   = true;            // If true, use hlMid breakout instead of band breakout
 input bool     InpBreakoutClosedBar    = false;           // Breakout mode: evaluate channel, midline/band cross and trend flip on closed bars (false = v1.15 first-tick behavior)
 
 // Entry style
-input ENUM_ENTRY_MODE InpEntryMode     = ENTRY_REGIME_BREAKOUT; // Entry style (swing pullback ignores the breakout and trend-filter inputs)
+input ENUM_ENTRY_MODE InpEntryMode     = ENTRY_SWING_PULLBACK; // Entry style (v1.17 default: swing pullback, which ignores the breakout and trend-filter inputs)
 input int      InpBiasEMALength        = 50;              // Swing mode: EMA length for the bias on M30/H1/H4
 input int      InpBiasMinAgree         = 2;               // Swing mode: how many of M30/H1/H4 must agree (1-3)
 input ENUM_TIMEFRAMES InpSwingTF       = PERIOD_M30;      // Swing mode: timeframe of the swing points used for entry and TP1
@@ -142,8 +160,18 @@ input double   InpSwingSLBufferATR     = 0.3;             // Swing mode: SL beyo
 input double   InpSwingMinRR           = 1.0;             // Swing mode: skip if TP1 distance < this x SL distance
 input double   InpSwingMaxDistATR      = 3.0;             // Swing mode: only use swings within this x ATR(swing TF) of price (0 = no limit)
 input bool     InpSwingCancelOnWait    = false;           // Swing mode: also cancel the pending order when the bias turns neutral
-input ENUM_SWING_ENTRY_STYLE InpSwingEntryStyle = SWING_LIMIT_AT_SWING; // Swing mode: limit order at the swing, or wait for a sweep and an M5 close back on the bias side
+input ENUM_SWING_ENTRY_STYLE InpSwingEntryStyle = SWING_CONFIRM_RECLAIM; // Swing mode: wait for a sweep and an M5 close back on the bias side (v1.17 default), or a limit order at the swing
 input double   InpSwingSweepMaxATR     = 1.0;             // Swing confirm entry: drop the setup if price goes beyond the swing by more than this x ATR(swing TF)
+
+// v1.17: exits, equity guard, trade windows, stop modifications while the market is closed
+input ENUM_TP1_EXIT InpExitAtTP1       = EXIT_STOP_TO_TP1; // What the stop does when TP1 / TP2 are reached (with InpMoveToBEafterTP1)
+input ENUM_TIMEFRAMES InpTrailATRTF    = PERIOD_CURRENT;  // ATR trailing timeframe (PERIOD_CURRENT = InpTF)
+input bool     InpUseEquityGuard       = true;            // Pause new entries while equity is InpEquityGuardPct or more below its rolling peak
+input double   InpEquityGuardPct       = 10.0;            // Equity guard: drawdown from the rolling peak that pauses new entries (%)
+input int      InpEquityGuardDays      = 7;               // Equity guard: rolling window for the peak (days)
+input bool     InpUseTradeWindows      = false;           // Only enter inside InpTradeWindows (server time); pending orders cancelled outside them
+input string   InpTradeWindows         = "06:00-10:00,11:00-13:00,15:00-17:00"; // Server time (UTC on Exness) = 10-14, 15-17, 19-21 at UTC+4
+input bool     InpThrottleClosedMarket = true;            // Don't send stop modifications while the symbol's trade session is closed
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
@@ -199,6 +227,17 @@ double   g_armTP1 = 0.0;        // opposite swing (TP1) when armed
 double   g_sweepExt = 0.0;      // most extreme price beyond the level since the sweep started (0 = no sweep yet)
 datetime g_armTime = 0;         // when the level was armed; only M5 bars closing after this count
 datetime g_lastConfirmBar = 0;  // last M5 bar processed
+// v1.17 state
+int      hTrailATR = INVALID_HANDLE;  // ATR on InpTrailATRTF when it differs from InpTF
+datetime g_eqHour[];                  // equity guard: hourly buckets (start of the hour) ...
+double   g_eqMax[];                   // ... and the highest equity seen in each
+double   g_eqPeak = 0.0;              // rolling peak over InpEquityGuardDays
+datetime g_eqPeakHour = 0;            // hour the peak was last recomputed
+bool     g_guardActive = false;       // entries paused by the equity guard
+int      g_winStart[];                // trade windows, minutes of the day (server time)
+int      g_winEnd[];
+datetime g_modifyPausedUntil = 0;     // no stop modifications before this time (after a "market closed" rejection)
+datetime g_lastStructBar = 0;         // structure trail: last M15 bar processed
 
 datetime lastBarTime = 0;
 double prevUp1 = 0.0, prevDn1 = 0.0;
@@ -347,6 +386,8 @@ bool EnsureHandles()
     hEMALow = iMA(InpSymbol, InpTF, InpCloudLength, 0, MODE_EMA, PRICE_LOW);
   if(InpUseTrendFilter && hTrendEMA == INVALID_HANDLE)
     hTrendEMA = iMA(InpSymbol, InpTrendTF, InpTrendEMALength, 0, MODE_EMA, PRICE_CLOSE);
+  if(InpTrailATRTF != PERIOD_CURRENT && InpTrailATRTF != InpTF && hTrailATR == INVALID_HANDLE)
+    hTrailATR = iATR(InpSymbol, InpTrailATRTF, InpATRPeriod);
   if(InpEntryMode == ENTRY_SWING_PULLBACK)
   {
     for(int i = 0; i < 3; i++)
@@ -782,6 +823,193 @@ ulong FindPendingOrder()
   return 0;
 }
 
+//---------------- v1.17 helpers: trade windows, closed market, risk cap, equity guard ----------------
+int ParseHHMM(string s)
+{
+  StringTrimLeft(s);
+  StringTrimRight(s);
+  string hm[];
+  if(StringSplit(s, ':', hm) != 2) return -1;
+  int h = (int)StringToInteger(hm[0]), m = (int)StringToInteger(hm[1]);
+  if(h < 0 || h > 24 || m < 0 || m > 59 || h * 60 + m > 1440) return -1;
+  return h * 60 + m;
+}
+
+// "06:00-10:00,11:00-13:00" -> g_winStart/g_winEnd in minutes. A window may wrap midnight (22:00-02:00).
+bool ParseTradeWindows()
+{
+  ArrayResize(g_winStart, 0);
+  ArrayResize(g_winEnd, 0);
+  string parts[];
+  int n = StringSplit(InpTradeWindows, ',', parts);
+  for(int i = 0; i < n; i++)
+  {
+    string p = parts[i];
+    StringTrimLeft(p);
+    StringTrimRight(p);
+    if(p == "") continue;
+    string se[];
+    if(StringSplit(p, '-', se) != 2) return false;
+    int a = ParseHHMM(se[0]), b = ParseHHMM(se[1]);
+    if(a < 0 || b < 0 || a == b) return false;
+    int k = ArraySize(g_winStart);
+    ArrayResize(g_winStart, k + 1);
+    ArrayResize(g_winEnd, k + 1);
+    g_winStart[k] = a;
+    g_winEnd[k] = b;
+  }
+  return (ArraySize(g_winStart) > 0);
+}
+
+// True when trade windows are off or the current server time is inside one of them (start inclusive, end exclusive).
+bool InTradeWindow()
+{
+  if(!InpUseTradeWindows) return true;
+  MqlDateTime dt;
+  TimeToStruct(TimeCurrent(), dt);
+  int mod = dt.hour * 60 + dt.min;
+  for(int i = 0; i < ArraySize(g_winStart); i++)
+  {
+    int a = g_winStart[i], b = g_winEnd[i];
+    if(a < b ? (mod >= a && mod < b) : (mod >= a || mod < b)) return true;
+  }
+  return false;
+}
+
+// Is the symbol's trade session open now (server time)? Without any session information it does not block.
+bool SymbolTradeSessionOpen()
+{
+  MqlDateTime dt;
+  TimeToStruct(TimeCurrent(), dt);
+  datetime sod = (datetime)(dt.hour * 3600 + dt.min * 60 + dt.sec);
+  datetime from = 0, to = 0;
+  bool anyToday = false;
+  for(uint i = 0; i < 16; i++)
+  {
+    if(!SymbolInfoSessionTrade(InpSymbol, (ENUM_DAY_OF_WEEK)dt.day_of_week, i, from, to)) break;
+    anyToday = true;
+    if(sod >= from && sod < to) return true;
+  }
+  if(anyToday) return false;
+  for(int d = 0; d < 7; d++)
+    if(SymbolInfoSessionTrade(InpSymbol, (ENUM_DAY_OF_WEEK)d, 0, from, to)) return false;  // no session today (weekend)
+  return true;
+}
+
+// Risk sizing floors the lot to the volume step, so risk never exceeds InpRiskPercent -- except when the result is
+// below the minimum lot and gets raised to it. Then the trade is skipped if that minimum lot risks more than
+// InpMaxRiskPercent of equity.
+bool RiskWithinCap(double lots, double stopDist, string who)
+{
+  if(!InpUseRiskSizing || InpMaxRiskPercent <= 0.0 || lots <= 0.0 || stopDist <= 0.0) return true;
+  double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+  double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+  double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
+  if(tickSize <= 0.0 || equity <= 0.0) return true;
+  double riskPct = lots * (stopDist / tickSize) * tickValue / equity * 100.0;
+  if(riskPct <= InpMaxRiskPercent) return true;
+  PrintFormat("%s: skip, minimum lot risks %.2f%% of equity > max %.2f%% (stop %.2f, lots %.2f, equity %.2f)",
+              who, riskPct, InpMaxRiskPercent, stopDist, lots, equity);
+  return false;
+}
+
+// Equity guard: highest equity per hour over the last InpEquityGuardDays days.
+void EquityGuardRecord(datetime t, double v)
+{
+  datetime h = t - (t % 3600);
+  int n = ArraySize(g_eqHour);
+  if(n > 0 && h <= g_eqHour[n - 1])
+  {
+    if(v > g_eqMax[n - 1]) g_eqMax[n - 1] = v;
+  }
+  else
+  {
+    ArrayResize(g_eqHour, n + 1, 256);
+    ArrayResize(g_eqMax, n + 1, 256);
+    g_eqHour[n] = h;
+    g_eqMax[n] = v;
+  }
+  if(v > g_eqPeak) g_eqPeak = v;
+}
+
+void EquityGuardRecomputePeak(datetime now)
+{
+  datetime cutoff = now - InpEquityGuardDays * 86400;
+  int n = ArraySize(g_eqHour), drop = 0;
+  while(drop < n && g_eqHour[drop] + 3600 <= cutoff) drop++;
+  if(drop > 0)
+  {
+    ArrayRemove(g_eqHour, 0, drop);
+    ArrayRemove(g_eqMax, 0, drop);
+  }
+  g_eqPeak = 0.0;
+  for(int i = 0; i < ArraySize(g_eqMax); i++) if(g_eqMax[i] > g_eqPeak) g_eqPeak = g_eqMax[i];
+}
+
+// On (re)start, rebuild the balance path of the window from deal history so a restart keeps the peak.
+void EquityGuardSeed()
+{
+  ArrayResize(g_eqHour, 0);
+  ArrayResize(g_eqMax, 0);
+  g_eqPeak = 0.0;
+  datetime now = TimeCurrent();
+  datetime from = now - InpEquityGuardDays * 86400;
+  if(HistorySelect(from, now))
+  {
+    int n = HistoryDealsTotal();
+    double after[];
+    datetime times[];
+    ArrayResize(after, n);
+    ArrayResize(times, n);
+    double run = AccountInfoDouble(ACCOUNT_BALANCE);
+    for(int i = n - 1; i >= 0; i--)
+    {
+      ulong tk = HistoryDealGetTicket(i);
+      times[i] = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
+      after[i] = run;
+      run -= HistoryDealGetDouble(tk, DEAL_PROFIT) + HistoryDealGetDouble(tk, DEAL_SWAP) + HistoryDealGetDouble(tk, DEAL_COMMISSION);
+    }
+    EquityGuardRecord(from, run);
+    for(int i = 0; i < n; i++) EquityGuardRecord(times[i], after[i]);
+  }
+  EquityGuardRecord(now, AccountInfoDouble(ACCOUNT_EQUITY));
+  g_eqPeakHour = now - (now % 3600);
+}
+
+// Called on every tick. True while new entries are paused; open trades keep their stops.
+bool EquityGuardActive()
+{
+  if(!InpUseEquityGuard || InpEquityGuardPct <= 0.0) return false;
+  datetime now = TimeCurrent();
+  double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+  datetime h = now - (now % 3600);
+  if(h != g_eqPeakHour)
+  {
+    g_eqPeakHour = h;
+    EquityGuardRecomputePeak(now);
+  }
+  EquityGuardRecord(now, eq);
+  bool active = (g_eqPeak > 0.0 && eq <= g_eqPeak * (1.0 - InpEquityGuardPct / 100.0));
+  if(active != g_guardActive)
+  {
+    g_guardActive = active;
+    // With a trade open, equity can sit right at the limit and cross it on every tick. The state stays exact;
+    // the log is limited to one line per minute (plus how many crossings were not logged).
+    static datetime lastLog = 0;
+    static int      quietFlips = 0;
+    if(now - lastLog >= 60)
+    {
+      PrintFormat("Equity guard: %s (equity %.2f, %d-day peak %.2f, limit %.1f%%%s)",
+                  active ? "PAUSING new entries" : "entries resumed", eq, InpEquityGuardDays, g_eqPeak, InpEquityGuardPct,
+                  quietFlips > 0 ? StringFormat("; %d more crossings in the last minute", quietFlips) : "");
+      lastLog = now;
+      quietFlips = 0;
+    }
+    else quietFlips++;
+  }
+  return active;
+}
+
 // Same margin / spread / session gates the breakout entries use.
 bool SwingEntryFiltersPass()
 {
@@ -813,6 +1041,11 @@ bool SwingEntryFiltersPass()
       return false;
     }
   }
+  if(InpUseTradeWindows && !InTradeWindow())
+  {
+    Print("Swing: skip, outside trade windows");
+    return false;
+  }
   return true;
 }
 
@@ -830,7 +1063,9 @@ double SwingLots(double entry, double sl, ENUM_ORDER_TYPE ot)
   double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
   lots = MathFloor(lots / step) * step;
   lots = MathMax(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN), MathMin(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX), lots));
-  return AdjustLotsByMargin(lots, entry, ot);
+  lots = AdjustLotsByMargin(lots, entry, ot);
+  if(lots > 0.0 && !RiskWithinCap(lots, risk, "Swing")) return 0.0;
+  return lots;
 }
 
 // Works out the limit order the current bias calls for: the most recent swing on the right side of price
@@ -1010,7 +1245,7 @@ void SwingConfirmCheck()
   double lots = SwingLots(entry, sl, ot);
   if(lots <= 0.0)
   {
-    SwingDisarm("not enough margin for the minimum lot");
+    SwingDisarm("lot size: margin or max risk");
     return;
   }
   Trade.SetDeviationInPoints(InpSlippagePoints);
@@ -1084,7 +1319,7 @@ void PlanSwingEntry(int bias, bool filtersPass)
   double lots = SwingLots(entry, sl, ot);
   if(lots <= 0.0)
   {
-    Print("Swing: skip, not enough margin for the minimum lot");
+    Print("Swing: skip, lot size (margin or max risk)");
     return;
   }
   Trade.SetAsyncMode(false);
@@ -1103,6 +1338,64 @@ void PlanSwingEntry(int bias, bool filtersPass)
   lastTicket = 0;
   PrintFormat("Swing: placed %s LIMIT %.2f lots @ %.2f sl=%.2f tp1=%.2f (risk %.2f, reward %.2f)",
               bias > 0 ? "BUY" : "SELL", lots, entry, sl, tp1, MathAbs(entry - sl), MathAbs(tp1 - entry));
+}
+
+//---------------- v1.17 exit rules ----------------
+// Stop level wanted when TP1 (level 1) or TP2 (level 2) is reached; 0 = leave the stop where it is.
+//  EXIT_STOP_TO_TP1:     TP1 price, then TP2 price (v1.12-v1.16 behavior, unchanged).
+//  EXIT_STOP_TO_BE:      breakeven + current spread at TP1, TP1 price at TP2.
+//  EXIT_STRUCTURE_TRAIL: the last closed M15 swing beyond price (-/+ spread), re-checked on every new M15 bar.
+// The last two never loosen the stop.
+double StructureStop(int dir)
+{
+  double sw[];
+  double pt = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+  double buf = (double)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD) * pt;
+  double minDist = (GetStopsLevelPoints() + 2) * pt;
+  int n = FindSwings(PERIOD_M15, dir < 0, InpSwingStrength, 5, sw);
+  if(dir > 0)
+  {
+    double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+    for(int i = 0; i < n; i++) if(sw[i] - buf < bid - minDist) return sw[i] - buf;
+  }
+  else
+  {
+    double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+    for(int i = 0; i < n; i++) if(sw[i] + buf > ask + minDist) return sw[i] + buf;
+  }
+  return 0.0;
+}
+
+double ExitStopOnTarget(int dir, int level, double entry, double tp1, double tp2, double curSL)
+{
+  if(InpExitAtTP1 == EXIT_STOP_TO_TP1) return (level == 1 ? tp1 : tp2);
+  double want = 0.0;
+  if(InpExitAtTP1 == EXIT_STOP_TO_BE)
+  {
+    double spread = (double)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD) * SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+    want = (level == 1 ? entry + dir * spread : tp1);
+  }
+  else want = StructureStop(dir);
+  if(want <= 0.0) return 0.0;
+  if(curSL > 0.0 && (dir > 0 ? want <= curSL : want >= curSL)) return 0.0;
+  return NormalizeDouble(want, _Digits);
+}
+
+bool StructureBarNew()
+{
+  datetime b = iTime(InpSymbol, PERIOD_M15, 0);
+  if(b == 0 || b == g_lastStructBar) return false;
+  g_lastStructBar = b;
+  return true;
+}
+
+// ATR used by the trailing stop: InpTrailATRTF if set, else the working timeframe's ATR.
+double TrailATR(double atrWork)
+{
+  if(hTrailATR == INVALID_HANDLE) return atrWork;
+  double b[1];
+  if(CopyBuffer(hTrailATR, 0, 0, 1, b) == 1 && b[0] > 0.0) return b[0];
+  return atrWork;
 }
 
 // Swing-mode targets from the stored plan: R = distance from the actual fill to the planned SL, TP1 = the
@@ -1131,7 +1424,7 @@ void SwingHUDLines(string &l1, color &c1, string &l2, string &l3)
   l1 = StringFormat("Bias M30:%s H1:%s H4:%s -> %s", BiasWord(g_biasTF[0]), BiasWord(g_biasTF[1]), BiasWord(g_biasTF[2]),
                     g_bias > 0 ? "BUY" : (g_bias < 0 ? "SELL" : "WAIT"));
   c1 = (g_bias > 0 ? HUD_GREEN : (g_bias < 0 ? HUD_RED : HUD_SUBTEXT));
-  l2 = "No pending order";
+  l2 = (g_guardActive ? "Entries paused: equity guard" : "No pending order");
   l3 = " ";
   if(g_armDir != 0)
   {
@@ -1692,7 +1985,12 @@ void MoveSLto(double slNew)
     return;
   double pt = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
   if(currentSL > 0.0 && MathAbs(clamped - currentSL) <= 0.5*pt) return; // no effective change
-  Trade.PositionModify(ticket, clamped, currentTP);
+  // v1.17: no requests while the trade session is closed (a 2-day test sent 7,811 rejected ones), and a
+  // 60-second pause after a "market closed" rejection in case the session table and the server disagree.
+  if(InpThrottleClosedMarket && (TimeCurrent() < g_modifyPausedUntil || !SymbolTradeSessionOpen())) return;
+  if(!Trade.PositionModify(ticket, clamped, currentTP) && InpThrottleClosedMarket
+     && Trade.ResultRetcode() == TRADE_RETCODE_MARKET_CLOSED)
+    g_modifyPausedUntil = TimeCurrent() + 60;
 }
 
 double NormalizeLotsToSymbol(double desiredLots)
@@ -1754,6 +2052,17 @@ int OnInit()
               (int)InpEnableMarginCheck, InpMaxSpreadPoints);
   PrintFormat("Init: v1.16 EntryMode=%d BreakoutClosedBar=%d SwingEntryStyle=%d SweepMaxATR=%.2f",
               (int)InpEntryMode, (int)InpBreakoutClosedBar, (int)InpSwingEntryStyle, InpSwingSweepMaxATR);
+  bool windowsOk = ParseTradeWindows();
+  if(InpUseTradeWindows && !windowsOk)
+  {
+    PrintFormat("Init: could not read InpTradeWindows \"%s\" (expected e.g. 06:00-10:00,11:00-13:00)", InpTradeWindows);
+    return(INIT_PARAMETERS_INCORRECT);
+  }
+  EquityGuardSeed();
+  PrintFormat("Init: v1.17 RiskSizing=%d Risk%%=%.2f MaxRisk%%=%.2f EquityGuard=%d (%.1f%%, %d days, peak %.2f) TradeWindows=%d [%s] ExitAtTP1=%d TrailATRTF=%d ThrottleClosedMarket=%d",
+              (int)InpUseRiskSizing, InpRiskPercent, InpMaxRiskPercent, (int)InpUseEquityGuard, InpEquityGuardPct,
+              InpEquityGuardDays, g_eqPeak, (int)InpUseTradeWindows, InpTradeWindows, (int)InpExitAtTP1,
+              (int)InpTrailATRTF, (int)InpThrottleClosedMarket);
   return(INIT_SUCCEEDED);
 }
 
@@ -1765,6 +2074,9 @@ void OnTick()
   if(!EnsureHandles()) return;
   UpdateHUD();
   SendTerminalTradeMarkersBack();
+
+  // v1.17 equity guard, evaluated on every tick so the rolling peak sees every equity value
+  bool guardActive = EquityGuardActive();
 
   // gate logic to new bar for signal generation
   bool newBar = IsNewBar();
@@ -1932,6 +2244,20 @@ void OnTick()
     }
   }
 
+  // v1.17 trade windows and equity guard for breakout entries (swing mode handles both in its own block)
+  if(InpUseTradeWindows && !InTradeWindow())
+  {
+    if(newBar && (buySignal || sellSignal)) Print("Skip entries: outside trade windows");
+    buySignal = false;
+    sellSignal = false;
+  }
+  if(guardActive)
+  {
+    if(newBar && (buySignal || sellSignal)) Print("Skip entries: equity guard");
+    buySignal = false;
+    sellSignal = false;
+  }
+
   // One position at a time if configured
   double curEntry=0.0, curSL=0.0;
   int posDir = CurrentPositionDirection(curEntry, curSL);
@@ -1961,8 +2287,18 @@ void OnTick()
   {
     buySignal = false;
     sellSignal = false;
+    // v1.17: while the equity guard pauses entries (or, for limit orders, outside the trade windows) no order is
+    // left pending and no level stays armed. The confirmation entry checks the windows at the moment of entry.
+    bool outsideWindows = (InpUseTradeWindows && !InTradeWindow());
+    if(guardActive || (outsideWindows && InpSwingEntryStyle == SWING_LIMIT_AT_SWING))
+    {
+      ulong pend = FindPendingOrder();
+      if(pend != 0 && Trade.OrderDelete(pend))
+        PrintFormat("Swing: cancelled unfilled pending #%I64u (%s)", pend, guardActive ? "equity guard" : "outside trade windows");
+    }
+    if(guardActive && g_armDir != 0) SwingDisarm("equity guard");
     // Confirm style: process the just-closed M5 bar before the hourly re-plan that may run on the same tick.
-    if(InpSwingEntryStyle == SWING_CONFIRM_RECLAIM && posDir == 0)
+    if(InpSwingEntryStyle == SWING_CONFIRM_RECLAIM && posDir == 0 && !guardActive)
     {
       SwingConfirmCheck();
       posDir = CurrentPositionDirection(curEntry, curSL);
@@ -1972,7 +2308,13 @@ void OnTick()
     {
       g_lastBiasBar = h1Bar;
       g_bias = ComputeBias();
-      if(posDir == 0) PlanSwingEntry(g_bias, SwingEntryFiltersPass());
+      if(posDir == 0)
+      {
+        if(guardActive)
+          PrintFormat("Swing bias: M30=%d H1=%d H4=%d -> %d; new entries paused by the equity guard", g_biasTF[0], g_biasTF[1], g_biasTF[2], g_bias);
+        else
+          PlanSwingEntry(g_bias, InpSwingEntryStyle == SWING_CONFIRM_RECLAIM ? true : SwingEntryFiltersPass());
+      }
     }
   }
 
@@ -2022,6 +2364,10 @@ void OnTick()
       if(lots <= 0.0)
       {
         Print("Skip BUY: not enough margin for min lot after adjustment.");
+      }
+      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout BUY"))
+      {
+        // logged by RiskWithinCap
       }
       else
       {
@@ -2082,6 +2428,10 @@ void OnTick()
       if(lots <= 0.0)
       {
         Print("Skip SELL: not enough margin for min lot after adjustment.");
+      }
+      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout SELL"))
+      {
+        // logged by RiskWithinCap
       }
       else
       {
@@ -2224,19 +2574,33 @@ void OnTick()
           // 2026-09-15: stairstep lock — SL moves to TP1's price, not flat entry. Tested against
           // 2 years of real XAUUSDm data: lifts profit factor 0.70 -> 0.87 vs the old flat-BE
           // behavior, because a pullback after TP1 now exits with real profit, not breakeven.
-          if(InpMoveToBEafterTP1) MoveSLto(tp1);
+          if(InpMoveToBEafterTP1)
+          {
+            double s1 = ExitStopOnTarget(1, 1, curEntry, tp1, tp2, curSL);   // v1.17 exit rule (default: TP1 price)
+            if(s1 > 0.0) MoveSLto(s1);
+          }
         }
         // TP2
         if(tp1Hit && !tp2Hit && SymbolInfoDouble(InpSymbol, SYMBOL_BID) >= tp2)
         {
           ClosePartial(lastTicket, InpTP2CloseFrac);
           tp2Hit = true;
-          if(InpMoveToBEafterTP1) MoveSLto(tp2); // stairstep: lock at TP2's price too
+          if(InpMoveToBEafterTP1)
+          {
+            double s2 = ExitStopOnTarget(1, 2, curEntry, tp1, tp2, curSL);   // default: TP2 price (stairstep)
+            if(s2 > 0.0) MoveSLto(s2);
+          }
         }
-        // ATR trailing stop (long)
-        if(InpUseATRTrailing && lastTicket != 0)
+        // v1.17 structure trail: after TP1, follow the last closed M15 swing low on each new M15 bar
+        if(InpExitAtTP1 == EXIT_STRUCTURE_TRAIL && InpMoveToBEafterTP1 && tp1Hit && StructureBarNew())
         {
-          double trail = InpTrail_ATR_Mult * atr0;
+          double ss = ExitStopOnTarget(1, 1, curEntry, tp1, tp2, curSL);
+          if(ss > 0.0) MoveSLto(ss);
+        }
+        // ATR trailing stop (long); replaced by the structure trail under EXIT_STRUCTURE_TRAIL
+        if(InpUseATRTrailing && InpExitAtTP1 != EXIT_STRUCTURE_TRAIL && lastTicket != 0)
+        {
+          double trail = InpTrail_ATR_Mult * TrailATR(atr0);
           double curBid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
           double newSL = curBid - trail;
           if(newSL > curSL) MoveSLto(newSL);
@@ -2255,18 +2619,32 @@ void OnTick()
         {
           ClosePartial(lastTicket, InpTP1CloseFrac);
           tp1Hit = true;
-          if(InpMoveToBEafterTP1) MoveSLto(tp1);
+          if(InpMoveToBEafterTP1)
+          {
+            double s1 = ExitStopOnTarget(-1, 1, curEntry, tp1, tp2, curSL);
+            if(s1 > 0.0) MoveSLto(s1);
+          }
         }
         if(tp1Hit && !tp2Hit && SymbolInfoDouble(InpSymbol, SYMBOL_ASK) <= tp2)
         {
           ClosePartial(lastTicket, InpTP2CloseFrac);
           tp2Hit = true;
-          if(InpMoveToBEafterTP1) MoveSLto(tp2);
+          if(InpMoveToBEafterTP1)
+          {
+            double s2 = ExitStopOnTarget(-1, 2, curEntry, tp1, tp2, curSL);
+            if(s2 > 0.0) MoveSLto(s2);
+          }
+        }
+        // v1.17 structure trail (short)
+        if(InpExitAtTP1 == EXIT_STRUCTURE_TRAIL && InpMoveToBEafterTP1 && tp1Hit && StructureBarNew())
+        {
+          double ss = ExitStopOnTarget(-1, 1, curEntry, tp1, tp2, curSL);
+          if(ss > 0.0) MoveSLto(ss);
         }
         // ATR trailing stop (short)
-        if(InpUseATRTrailing && lastTicket != 0)
+        if(InpUseATRTrailing && InpExitAtTP1 != EXIT_STRUCTURE_TRAIL && lastTicket != 0)
         {
-          double trail = InpTrail_ATR_Mult * atr0;
+          double trail = InpTrail_ATR_Mult * TrailATR(atr0);
           double curAsk = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
           double newSL = curAsk + trail;
           if(newSL < curSL || curSL == 0.0) MoveSLto(newSL);

@@ -89,6 +89,20 @@ HUD: STATS and RISK CALC tabs, session line (Tokyo/London/NY/overlap/break/weeke
 bias and pending order in swing mode. `OnChartEvent` (tab clicks, calculator edits) does not run in the
 tester.
 
+### v1.16-v1.17 additions
+- v1.16: `MoveSLto()` selects the EA's own position by magic/ticket (hedging fix);
+  `InpBreakoutClosedBar`; `InpSwingEntryStyle` (0 limit, 1 M5 sweep-and-reclaim confirmation) and
+  `InpSwingSweepMaxATR`.
+- v1.17 **defaults**: `InpEntryMode=1` (swing), `InpSwingEntryStyle=1` (confirmation),
+  `InpUseRiskSizing=true` at `InpRiskPercent=1.0` with `InpMaxRiskPercent=1.5` (skip when the 0.01
+  minimum lot would risk more), equity guard `InpUseEquityGuard=true` / 10% / 7 days (no new
+  entries, pending orders cancelled), `InpThrottleClosedMarket=true` (no stop modifications outside
+  trade sessions).
+- v1.17 inputs off by default: `InpExitAtTP1` (0 stop to TP1/TP2 price, 1 breakeven + spread then
+  TP1 price, 2 M15 structure trail with no ATR trail), `InpTrailATRTF`, `InpUseTradeWindows` +
+  `InpTradeWindows`.
+- Order comments stay `ATRRegime*` / `SwingPullback*` (the parser keys on them).
+
 ## 3. The user's test settings
 
 From `ini_runs/visualcheck_H1_20260907.ini` (the user's own Strategy Tester inputs): tester chart H1,
@@ -100,6 +114,19 @@ defaults (EMA 50, 2 of 3 agree, M30 swings, strength 2, SL buffer 0.3 ATR, min R
 3 ATR, cancel on wait off).
 
 The user also runs visual tests on M5 with `InpTF` = M5.
+
+**Careful:** the base ini lists `InpUseRiskSizing=false`, so runs meant to use the v1.17 defaults need
+`EXTRA_INPUTS="InpUseRiskSizing=true"` (inputs not in the ini take the EA defaults).
+
+**The user's rules (answers of 2026-09-15):**
+- Risk 1% per trade. A "moving" 10% weekly drawdown limit, implemented as: no new entries while equity
+  is >= 10% below its rolling 7-day peak (an interpretation, recorded as an assumption).
+- Trading hours at UTC+4 (no DST): 10:00-14:00, 15:00-17:00, 19:00-21:00 = **06:00-10:00, 11:00-13:00,
+  15:00-17:00 UTC** (server time) all year.
+- No manual trading on the EA's account.
+- Trades FOMC/NFP/CPI carefully rather than avoiding them (future idea: reduced risk around them).
+- Account size not stated. At 1% risk the 0.01 minimum lot needs roughly equity >= stop distance x 67
+  (e.g. an $8 stop at 0.01 lot needs ~$530 to stay under 1.5%). Round 2 tested at $5,000.
 
 ## 4. Tooling: compile, run, parse
 
@@ -123,6 +150,9 @@ WEEK_START=2026-03-02 WEEK_COUNT=12 TAG=holdoutA python mt5_mode_compare.py swin
 # override EA inputs for this batch (semicolon-separated; replaces the base ini value or appends it)
 EXTRA_INPUTS="InpSwingSLBufferATR=0.5;InpUseSessionFilter=true" TAG=expX WEEKS=12 python mt5_mode_compare.py swing
 ```
+
+`DEPOSIT=5000` sets the starting balance per week (default 500). `mt5_deep_parse.parse_one()` groups
+partial closes into one trade and computes R at the traded volume; report names must contain `__`.
 
 Outputs: per-week and pooled stats table on stdout, `mode_compare_trades<TAG>.csv` in the repo root,
 reports `cmp<TAG>_<mode>_<week>__M15sig.htm` in the MT5 data folder. After a batch, check the tester
@@ -215,12 +245,26 @@ Neither mode is profitable. Breakout's entry is close to random (see `ea-code-au
 
 v1.16 (2026-09-15) added `InpBreakoutClosedBar`, `InpSwingEntryStyle`, `InpSwingSweepMaxATR` (all default
 off) and the hedging `MoveSLto()` fix. Validation (Mar 2 - May 22) and holdout (Jan 5 - Feb 27) weeks are
-still unused for strategy decisions. About 8 ideas have been tried on the Jun 22 - Sep 11 weeks.
+still unused for strategy decisions.
 
-Ideas raised but **not yet tested**: exit management in MT5 (stairstep lock to TP1 price and trail 1.5 were
-chosen with the rejected Python simulator), structure-based trailing, session filter to London/NY (E1's
-session split showed nothing), news blackout from an imported schedule, risk-based sizing comparison,
-throttling stop modifications while the market is closed (7,811 rejected requests in one 2-day run).
+Round 2 (v1.17, 12 wk IS, $5,000/week, 1% risk; JOURNAL "Review round 2"):
+
+| Question | Answer |
+|---|---|
+| v1.17 with old inputs = v1.15? Market-closed throttle changes trades? | Identical (Jul 6 both modes); Jan 5-7: 7,811 -> 0 rejected modifies, 28 trades identical |
+| B2 = v1.17 defaults (swing, confirmation entry, 1% sizing, guard, throttle) | 56 trades, +3.37R, +$115.35, PF 1.09, worst week 4.0%; guard never triggered |
+| X1a breakeven + spread at TP1 | 55 of 56 trades identical; +2.62R; rejected |
+| X1b M15 structure trail after TP1 (no ATR trail) | +19.27R but 3 weeks = +39.7R, others -20.4R; paired t 0.63; not a clear pass |
+| X1c ATR trail on M30 | +18.92R but 2 weeks = +26.7R, others -7.8R; paired t 1.12; not a clear pass |
+| X2 user's trade windows (06-10, 11-13, 15-17 UTC) | 27 trades, +0.97R; B2 trades outside the windows were +6.57R; rejected |
+| Min lot vs 1.5% cap on small accounts (B2 stops) | $500: 26 of 56 skipped; $1,000: 5; $2,000: 0 |
+
+About 12 ideas have now been tried on the Jun 22 - Sep 11 weeks; they are exhausted for tuning.
+
+Ideas raised but **not yet tested**: a single pre-registered confirmatory run of the looser trail (X1c, or
+X1b) on the unused validation weeks; reduced risk around FOMC/NFP/CPI (needs a schedule file); continuous
+multi-week runs so the rolling equity guard sees more than one week; structure-based initial stops with
+risk sizing.
 
 ## 9. History
 

@@ -801,3 +801,168 @@ noise. With ~8 ideas now tried on these weeks, no third tester experiment was ru
 - Kept in the code, default off: `InpSwingEntryStyle`, `InpSwingSweepMaxATR`,
   `InpBreakoutClosedBar`. Kept and verified: the hedging `MoveSLto()` fix.
 - Trades: `mt5_review_E1E2_12wk_trades.csv` (mode `swing_confirm_E1` / `breakout_closedbar_E2`).
+
+
+---
+
+## 2026-09-15 -- Review round 2: user-approved defaults (v1.17) and exit/session experiments
+
+Report: `reviews/2026-09-15-pro-trader-review-round2.md`.
+
+**User's answers to round 1:** no manual trading on the EA's account; 1% risk per trade; a
+"moving" 10% weekly drawdown limit, read as *no new entries while equity is 10% or more below
+its highest value of the last 7 days (rolling); open trades keep their stops; entries resume when
+equity is back inside the limit* (an assumption); trading hours 10:00-14:00, 15:00-17:00 and
+19:00-21:00 at UTC+4 = **06:00-10:00, 11:00-13:00, 15:00-17:00 UTC** (server time) all year;
+swing mode as default; no news filter this round (future: reduced risk around FOMC/NFP/CPI);
+exit management to be decided on evidence; fix the stop-modify flood while the market is
+closed; commits stay local.
+
+**Approved defaults in v1.17 (risk controls, not a claim of edge):** `InpEntryMode` = swing;
+`InpUseRiskSizing=true`, `InpRiskPercent=1.0` (lot floored to the 0.01 step, so risk never exceeds
+1% unless it had to be raised to the 0.01 minimum; then the trade is skipped if that minimum lot
+risks more than `InpMaxRiskPercent=1.5`%); equity guard `InpUseEquityGuard=true`, 10%, 7 days
+(cancels pending orders and armed levels while active); `InpThrottleClosedMarket=true`.
+
+**My choice: swing entry style = confirmation entry (E1) as default.** Round 1, same 12 weeks:
+limit orders 77 trades, -0.23R per trade, 55% of losers stopped within 5 min; confirmation 56
+trades, +0.02R per trade, 11%. Neither passed, but the confirmation entry is the better-behaved
+one, it is the user's own M5 step, and its entry happens at one moment, which makes the session
+rule in X2 clean.
+
+**Test conditions for this round:** the user's ini plus `InpUseRiskSizing=true` (the ini sets it
+false explicitly), real ticks, **$5,000 at the start of each week**. Why not $500: at $500, 1% is
+$5 and XAUUSDm's 0.01 minimum lot moves $1 per 1.00, so sizing is coarse (0.01 or 0.02 lots),
+partial closes at TP1/TP2 are impossible below 0.04 lots, and confirmation-entry stops above
+$7.50 would be skipped. At $5,000 the lot is accurate to a few percent and the TP ladder works
+as designed; results in R apply to any account where 1% is implementable, and $ are ~$50 per R.
+How many trades a $500 / $1,000 account would skip is computed from B2's stop distances.
+Weeks: IS Jun 22 - Sep 11 (12); validation Mar 2 - May 22 (12, unused); holdout Jan 5 - Feb 27
+(8, unused; Jan 5-7 is also used for the market-closed request count, which is not a strategy
+test). Each week is a separate test, so the rolling guard only sees that week's equity.
+
+**Multiple testing:** 8 ideas were tried on the IS weeks before this round; X1a, X1b, X1c and X2
+make 12. **Sample size:** the confirmation entry made 56 trades in 12 weeks and X2 will have
+roughly a third of that -- below the protocol's 80. Judged in R, with a paired comparison where
+entries are shared; nothing in this round can establish an edge on its own.
+
+**Checks before the experiments:** (1) v1.17 with v1.16-equivalent inputs (sizing off, limit
+entry, guard off, throttle on) must reproduce the stored v1.15 trades on Jul 6, both modes;
+(2) Jan 5-7 breakout run (the one with 7,811 rejected modifies) with the throttle off vs on:
+rejected-request count, and trades must be identical.
+
+**B2 (new baseline):** v1.17 defaults -- swing mode, confirmation entry, 1% sizing (max 1.5%),
+equity guard, throttle, exit rule 0 (stop to the TP1 price at TP1, to the TP2 price at TP2), ATR
+trail 1.5 x ATR(M15), around the clock.
+
+### Experiment X1 -- exit management (pre-registered 2026-09-15)
+Three variants on B2's entries; only the exit changes.
+- **X1a** `InpExitAtTP1=1`: at TP1 stop to breakeven + spread, at TP2 to the TP1 price; ATR(M15)
+  trail unchanged. Hypothesis: the stop at the TP1 price sits at the market the moment TP1 is
+  touched, so any retest closes the rest; breakeven lets the trade survive the retest.
+- **X1b** `InpExitAtTP1=2`: from TP1 on, the stop follows the last closed M15 swing (strength 2)
+  -/+ spread, checked at TP1 and on every new M15 bar, never loosened; no ATR trailing; before TP1
+  only the initial stop. Hypothesis: a structure trail exits on real reversals and lets winners
+  reach TP2/TP3, where ATR(M15) x 1.5 exits on normal pullbacks.
+- **X1c** `InpTrailATRTF=30`: exit rule 0 with the trail at 1.5 x ATR(M30) (the planning
+  timeframe) instead of M15. Hypothesis: fewer premature trail exits on M30-planned trades.
+- **Metrics:** paired R on trades with the same entry time and direction as B2 (entries stay
+  identical until a different exit changes when the next trade can start); total R, average R;
+  $ net and PF at 1%; weekly R; worst weekly drawdown.
+- **Clear IS pass (-> validation):** paired mean dR >= +0.10R per trade with t >= 2.4 (Bonferroni
+  over 3 variants); total R >= B2; weekly R >= B2 in >= 7 of 12 weeks; worst weekly DD <= 1.25 x
+  B2. Absolute PF is reported but not required (exits are compared on the same entries).
+- **Validation pass:** paired mean dR > 0 and at least half the IS value; total R >= B2.
+  Holdout, only then: paired mean dR > 0 and total R >= B2.
+- **Falsified if:** mean dR <= 0.
+- **Default:** a variant becomes the default only after passing validation (and holdout);
+  otherwise exit rule 0 and the M15 trail stay, with the variants behind inputs.
+
+### Experiment X2 -- the user's trade windows (pre-registered 2026-09-15)
+- **Change:** `InpUseTradeWindows=true`, `InpTradeWindows=06:00-10:00,11:00-13:00,15:00-17:00`
+  (server time = UTC, start inclusive, end exclusive).
+- **Rule:** bias checks, arming and sweep tracking continue around the clock; the entry is taken
+  only if the confirmation (the first tick after the M5 confirmation bar closes) falls inside a
+  window, otherwise the setup is dropped and can be re-armed at the next hourly check. (For the
+  limit-order style, not tested: orders are placed only inside a window and cancelled at the first
+  tick outside, so fills can only happen inside.) Why: the user only takes entries while at the
+  screen in those hours; a setup that completes outside them is one they would not trade.
+- **Hypothesis:** entries in the user's hours (London morning, pre-New York, New York open) are
+  better than Asia and late-US entries.
+- **Clear IS pass:** total R >= B2's; average R >= B2's + 0.15R; PF in R >= 1.25; weekly R >= B2 in
+  >= 7 of 12 weeks; worst weekly DD <= 1.25 x B2; and B2's trades outside the windows have mean
+  R < 0. With ~20 trades this can at best justify a validation run.
+- **Validation pass:** total R >= B2 and average R >= B2's + 0.075R.
+- **Falsified if:** X2's average R <= B2's.
+- **Default:** trade windows are switched on by default only if X2 passes validation (and
+  holdout); otherwise around the clock stays, with the windows behind the input.
+
+### Round 2 checks (results)
+- **Regression:** v1.17 with v1.16-equivalent inputs reproduced the stored v1.15 trades exactly on
+  Jul 6 (breakout 82 trades -$222.05, swing 7 trades -$14.21).
+- **Market-closed fix:** Jan 5-7 breakout run with the user's inputs: `InpThrottleClosedMarket=false`
+  7,811 rejected "Market closed" stop modifications, `=true` 0. Trades identical (28, +$81.63, final
+  balance $581.63 in both).
+- **Parser:** identical output to the stored CSV on the 0.01-lot Jul 6 reports. First parse of the
+  $5,000 runs showed a bug -- balances of $1,000+ are written as "5 080.46" and became NaN (weekly
+  drawdown read 0%); fixed and all round-2 reports re-parsed.
+- **Every IS batch** (B2, X1a, X1b, X1c, X2): 12 runs, the intended inputs in each tester log, a ticks
+  line per week. Sizing at $5,000: 0.02-0.14 lots, 0.68-1.04% of the week's starting balance
+  (equity at entry can be higher), 0 trades skipped by the 1.5% cap, 0 equity-guard activations in
+  any round-2 run (worst weekly closed-balance drawdown 4.6%).
+- **Equity guard, functional test** (Jun 22 week, B2 with the guard set to 1% / 1 day so it must
+  fire): paused at 15:04 on Jun 22 (equity $5,022.44 vs 1-day peak $5,073.55), 46 hourly checks
+  skipped planning, 3 entries instead of B2's 5, resumed on Jun 26 once the old peak left the
+  window. It flapped: with a trade open, equity crossed the limit on tick after tick (76 pause + 76
+  resume log lines). Fixed by logging at most one line per minute with a count of the unlogged
+  crossings; the guard state itself is unchanged. Re-run: same 3 trades and $5,025.87, 14 log lines.
+- **1.5% cap, functional test** (same week at $500): all 5 setups skipped with a log line each
+  (0.01 lot would have risked 1.59%-3.45%); 0 trades. The parser crashed on the zero-trade report;
+  fixed.
+- **Small accounts (from B2's 56 stop distances, median 7.19, range 3.44-17.23):** at $500 the 0.01
+  minimum lot would be needed for 43 trades and 26 would be skipped (> 1.5%); at $1,000, 5 skipped;
+  at $2,000, none.
+
+### B2 result (v1.17 defaults, IS 12 weeks, $5,000/week, 1% risk)
+56 trades (the same 56 entries as E1), win 33.9%, **+3.37R total, +0.060R per trade, PF 1.12 in R;
++$115.35, PF 1.09 in $**, 6 of 12 weeks positive, worst weekly drawdown 4.0%. Weekly R: -1.74,
++1.87, -2.48, +3.04, -1.01, -2.25, +0.57, +5.29, -2.51, +2.72, -1.48, +1.34. Six trades took a
+partial close at TP1. Inside the user's windows B2 made -3.20R on 24 trades; outside +6.57R on 32.
+
+### X1 results -- exits (IS): none is a clear pass; no validation run
+
+| Run | Trades | Win% | Total R | Avg R | PF (R) | Net $ | PF ($) | Weeks R >= B2 | Paired dR per trade (t) | Better / worse / same | Worst week DD |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B2 stop to TP1 price, ATR(M15) trail | 56 | 33.9 | +3.37 | +0.060 | 1.12 | +115.35 | 1.09 | -- | -- | -- | 4.0% |
+| X1a breakeven + spread at TP1 | 56 | 33.9 | +2.62 | +0.047 | 1.09 | +77.96 | 1.06 | 11/12 | -0.013 (t -1.00) | 0 / 1 / 55 | 4.0% |
+| X1b M15 structure trail after TP1 | 55 | 30.9 | +19.27 | +0.350 | 1.52 | +951.71 | 1.55 | 4/12 | +0.153 (t +0.63) | 13 / 26 / 15 | 4.6% |
+| X1c ATR trail on M30 | 57 | 38.6 | +18.92 | +0.332 | 1.60 | +901.36 | 1.60 | 6/12 | +0.179 (t +1.12) | 11 / 26 / 19 | 4.1% |
+
+- **X1a: rejected (falsified, dR <= 0).** Only 1 of 56 trades changed: TP1 (the opposite swing) is
+  rarely reached before the ATR trail has already pulled the stop past breakeven.
+- **X1b: not a clear pass.** +15.9R more than B2, but from three trending weeks (Jun 29 +11.65R,
+  Aug 10 +13.52R, Aug 24 +14.52R = +39.69R); the other nine weeks lost 20.41R (B2 in those nine
+  weeks: -6.51R). 26 trades worse, 13 better. t = 0.63 against 2.4 required; weeks better 4 < 7.
+- **X1c: not a clear pass.** +15.6R more than B2, mostly Aug 10 (+14.34R) and Aug 24 (+12.34R);
+  the other ten weeks -7.77R (B2 there: -4.64R). t = 1.12 < 2.4; weeks better 6 < 7.
+- Reading: a looser trail (M30 ATR or M15 structure) gives back more on most trades and catches the
+  occasional trend leg much better. In 12 weeks that is two or three trends -- not enough to tell a
+  real effect from luck, and in the choppy weeks it costs. **Exit decision: keep the TP1-price
+  stairstep and the 1.5 x ATR(M15) trail as default;** X1b/X1c stay behind `InpExitAtTP1` /
+  `InpTrailATRTF`. The best-supported next step is a single pre-registered confirmatory run of X1c
+  on the unused validation weeks.
+
+### X2 result -- the user's trade windows (IS): rejected
+27 trades (all entries inside the windows), win 29.6%, **+0.97R, +0.036R per trade, PF 1.07 in R;
++$46.57**; weeks R >= B2 6 of 12; worst weekly drawdown 1.9%. Falsified: average R below B2's
+(+0.060R), and the B2 trades the windows remove were the better ones (32 trades, +6.57R, +0.21R
+per trade). 24 of X2's trades are identical to B2 trades; 3 are new setups the windows made room
+for. Trading around the clock stays the default; the windows stay behind `InpUseTradeWindows`.
+
+### Round 2 conclusion
+- Promoted: none. Validation (Mar 2 - May 22) and holdout (Jan 5 - Feb 27) still unused.
+- Defaults in v1.17 are the approved risk controls plus the confirmation entry; exit rule 0 with the
+  ATR(M15) trail; no trade windows.
+- Ideas tried on the IS weeks: 12 (X1a, X1b, X1c, X2 added).
+- Trades: `mt5_review_round2_12wk_trades.csv` (modes `B2`, `X1a_breakeven`, `X1b_structure`,
+  `X1c_atr_m30`, `X2_windows`).

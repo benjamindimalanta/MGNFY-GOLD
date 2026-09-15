@@ -34,7 +34,7 @@ else:
     WEEKS = [datetime(2026, 8, 10), datetime(2026, 8, 17), datetime(2026, 8, 31), datetime(2026, 9, 7)]
 TAG = os.environ.get("TAG", "")
 EXTRA_INPUTS = [kv.strip() for kv in os.environ.get("EXTRA_INPUTS", "").split(";") if kv.strip()]
-DEPOSIT = 500.0
+DEPOSIT = float(os.environ.get("DEPOSIT", "500"))  # DEPOSIT=5000 for 1%-risk-sizing runs
 MODES = {"breakout": 0, "swing": 1}
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
 
