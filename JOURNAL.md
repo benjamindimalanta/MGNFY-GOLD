@@ -384,3 +384,99 @@ are omitted because the weeks are separate $100 accounts.)
   weekly results show the strategy's real P&L instead of stopping at ~-$50.
 - **Session filter** (finding 6) only after more weeks -- 19-65 trades per
   block is too thin to pick hours without overfitting.
+
+
+---
+
+## 2026-09-15 -- v1.14: breakout mode vs new swing-pullback mode, same 4 weeks, $500
+
+**Why:** the 4-week diagnosis above showed the breakout entry overtrading
+(~15 trades/day, most losers stopped within 30 min). The user described
+their manual method: bias from EMA direction plus higher highs / higher lows
+on higher timeframes, pending orders at the previous swing, re-checked every
+1-3 hours. v1.14 adds that as `InpEntryMode = ENTRY_SWING_PULLBACK`, using
+the user's chosen settings: **2 of 3** timeframes (M30, H1, H4) must agree,
+**EMA 50**, entries at **M30** swing points (swing = high/low beyond 2 bars
+each side). At every new H1 bar: cancel any unfilled order, re-check bias,
+place a limit order at the latest M30 swing low (buy) / high (sell). SL =
+swing -/+ 0.3 x ATR(M30); TP1 = opposite M30 swing; TP2/TP3 from the stored
+risk; skip if TP1 < 1R. Take-profit ladder, stairstep lock and trailing
+unchanged.
+
+**Test:** real MT5 Strategy Tester, real ticks, XAUUSDm, the user's inputs
+(`ini_runs/visualcheck_H1_20260907.ini`: H1 chart, `InpTF`=M15, fixed 0.01
+lot), full Mon-Fri weeks Aug 10, Aug 17, Aug 31, Sep 7, **$500 deposit** so
+the ~$53 margin floor of a $100 account can't cut weeks short. Only
+`InpEntryMode` differs. Runner: `mt5_mode_compare.py`; every trade:
+`mt5_modecompare_v114_trades.csv`; order-flow counts:
+`swing_log_summary.py` over the tester agent log.
+
+| Mode / week | Trades | Wins / Losses | Win% | Net $ | PF | End $ | MaxDD% | Avg win $ | Avg loss $ | Trades/day | Median loser hold |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Breakout Aug 10 | 80 | 28 / 52 | 35.0 | -58.01 | 0.85 | 440.40 | 27.9 | 11.79 | -7.46 | 16.0 | 26 min |
+| Swing Aug 10 | 10 | 3 / 7 | 30.0 | +31.46 | 2.31 | 531.46 | 2.3 | 18.46 | -3.42 | 2.0 | 10 min |
+| Breakout Aug 17 | 71 | 25 / 46 | 35.2 | +5.52 | 1.02 | 504.46 | 23.2 | 12.49 | -6.67 | 14.2 | 31 min |
+| Swing Aug 17 | 5 | 0 / 5 | 0.0 | -16.87 | 0.00 | 483.13 | 3.4 | -- | -3.37 | 1.0 | 6 min |
+| Breakout Aug 31 | 85 | 32 / 53 | 37.6 | -43.60 | 0.89 | 455.87 | 23.6 | 10.49 | -7.16 | 17.0 | 20 min |
+| Swing Aug 31 | 1 | 0 / 1 | 0.0 | -3.34 | 0.00 | 496.66 | 0.7 | -- | -3.34 | 0.2 | 29 min |
+| Breakout Sep 7 | 79 | 26 / 53 | 32.9 | +5.94 | 1.02 | 505.94 | 17.8 | 14.29 | -6.90 | 15.8 | 21 min |
+| Swing Sep 7 | 4 | 1 / 3 | 25.0 | +9.65 | 1.87 | 509.65 | 1.4 | 20.72 | -3.69 | 0.8 | 1 min |
+| **Breakout, 4 weeks** | **315** | **111 / 204** | **35.2** | **-90.15** | **0.94** | -- | -- | **12.16** | **-7.06** | **15.8** | **25 min** |
+| **Swing, 4 weeks** | **20** | **4 / 16** | **20.0** | **+20.90** | **1.38** | -- | -- | **19.03** | **-3.45** | **1.0** | **7 min** |
+
+**Swing-mode order flow** (from the tester log):
+
+| Week | Hourly bias checks | BUY / SELL / WAIT | Orders placed | Filled | Cancelled unfilled | Skips |
+|---|---|---|---|---|---|---|
+| Aug 10 | 108 | 32 / 11 / 65 | 41 | 10 | 31 | spread 2, R:R 1 |
+| Aug 17 | 113 | 36 / 2 / 75 | 38 | 5 | 32 | spread 2 |
+| Aug 31 | 112 | 23 / 37 / 52 | 58 | 1 | 56 | spread 3 |
+| Sep 7 | 108 | 5 / 22 / 81 | 27 | 4 | 23 | none |
+| **Total** | **441** | **96 / 72 / 273** | **164** | **20** | **142** | |
+
+### Findings
+
+1. **The $100 margin floor had distorted the earlier weekly results.** With
+   $500, breakout mode's Aug 17 week is +$5.52 (it was -$53.70 on $100, locked
+   out from Tuesday) and the full Sep 7 week is +$5.94 (Mon-Thu on $100 was
+   -$50.93). Aug 31 never hit the floor and is identical on both deposits
+   (-$43.60), which confirms the comparison is like-for-like. Breakout mode
+   over 4 weeks: PF 0.94, -$90.15 -- still losing, but close to breakeven
+   rather than -50% a week.
+2. **Swing mode fixes overtrading.** 1.0 trade/day vs 15.8, and max drawdown
+   0.7-3.4% per week vs 17.8-27.9%.
+3. **Too few trades to judge swing mode's edge.** 20 trades in 4 weeks. Its
+   +$20.90 / PF 1.38 comes almost entirely from one week (Aug 10: +$31.46).
+   That is not evidence the strategy works.
+4. **The stop is too tight.** 16 of 20 trades lost; the median loser was
+   stopped in 7 minutes; avg loss $3.45, i.e. the 0.3 x ATR(M30) buffer
+   (about 3-4 price units) below/above the swing. Price routinely wicks
+   through a swing by more than that before turning.
+5. **Winners are big when they happen.** Avg win $19.03 = 5.5x the avg loss.
+   All 20 exits were by stop (initial, stairstep or trailing); 0 reached TP3.
+6. **Most orders never fill.** 142 of 164 limit orders (87%) were cancelled
+   at the next hourly check; fill rate 12%. Aug 31: 58 placed, 1 filled.
+   The hourly cancel-and-replace throws away orders that often sit at the
+   same swing price (see repeated prices in the placement log). A visual
+   check (swing mode, M5 chart, Sep 1 13:00) showed the other half of the
+   problem: after a sharp drop, the latest M30 swing high was 4387.31 while
+   price traded near 4340, so the sell limit sat ~47 price units away
+   (~11x its stop distance) and could only fill on a full retrace. The
+   placement itself was correct -- the order and TP1 (4364.17) sit exactly
+   on the M30 swing high and swing low visible on the chart, and the HUD
+   showed "Bias M30:down H1:flat H4:down -> SELL" with the pending order.
+7. **The bias says WAIT 62% of the time** (273 of 441 checks) with 2-of-3
+   agreement.
+
+### Next tests (not yet run)
+
+- **Wider stop buffer:** `InpSwingSLBufferATR` 0.3 -> 0.75 and 1.0 (targets
+  finding 4).
+- **Keep the order while the plan is unchanged:** only cancel/replace when
+  the bias flips or the swing level changes, instead of every hour
+  (targets finding 6).
+- **Maximum distance from price:** only place the limit when the swing is
+  within a set multiple of ATR(M30) from current price; otherwise wait for a
+  nearer swing to form (targets the far-away orders in finding 6).
+- **More weeks:** all 12 full weeks with tick data (from Jun 22) before
+  reading anything into swing mode's PF (finding 3).

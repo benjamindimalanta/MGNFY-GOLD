@@ -41,9 +41,18 @@
 //|     Tester visual mode no longer adds indicator sub-windows,     |
 //|     which had shrunk the chart and cut off the bottom of the HUD.|
 //+------------------------------------------------------------------+
+//| v1.14 (2026-09-15): optional swing-pullback entry mode           |
+//|  (InpEntryMode). Bias per timeframe = price vs a rising/falling  |
+//|  EMA plus higher highs/lows (or lower) on M30, H1, H4, and       |
+//|  InpBiasMinAgree of them must agree. At each new H1 bar any       |
+//|  unfilled pending order is cancelled and a limit order is placed |
+//|  at the latest M30 swing low (buy) / high (sell), SL beyond it   |
+//|  by a fraction of ATR, TP1 at the opposite swing, TP2/TP3 from   |
+//|  the stored risk distance. Default mode is unchanged.            |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.13"
+#property version   "1.14"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -53,6 +62,12 @@
 #property description "Optional small-account mode: partial capture + BE buffer."
 #include <Trade/Trade.mqh>
 CTrade Trade;
+
+enum ENUM_ENTRY_MODE
+{
+  ENTRY_REGIME_BREAKOUT = 0, // Regime breakout (market orders)
+  ENTRY_SWING_PULLBACK  = 1  // Swing pullback (limit orders, M30/H1/H4 bias)
+};
 
 //-------------------- Inputs --------------------
 input string   InpSymbol               = "XAUUSDm";        // Symbol to trade
@@ -92,6 +107,15 @@ input bool     InpRequireTrendFlip     = false;           // If false, enter on 
 input int      InpBreakoutConfirmBars  = 1;               // Bars to confirm breakout (1 = close1 inside, close0 outside)
 input bool     InpUseMidlineBreakout   = true;            // If true, use hlMid breakout instead of band breakout
 
+// Entry style
+input ENUM_ENTRY_MODE InpEntryMode     = ENTRY_REGIME_BREAKOUT; // Entry style (swing pullback ignores the breakout and trend-filter inputs)
+input int      InpBiasEMALength        = 50;              // Swing mode: EMA length for the bias on M30/H1/H4
+input int      InpBiasMinAgree         = 2;               // Swing mode: how many of M30/H1/H4 must agree (1-3)
+input ENUM_TIMEFRAMES InpSwingTF       = PERIOD_M30;      // Swing mode: timeframe of the swing points used for entry and TP1
+input int      InpSwingStrength        = 2;               // Swing mode: bars on each side that define a swing high/low
+input double   InpSwingSLBufferATR     = 0.3;             // Swing mode: SL beyond the entry swing by this x ATR(swing TF)
+input double   InpSwingMinRR           = 1.0;             // Swing mode: skip if TP1 distance < this x SL distance
+
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
 input ENUM_TIMEFRAMES InpTrendTF       = PERIOD_H4;       // Trend timeframe
@@ -129,6 +153,16 @@ int    hEMAHigh = INVALID_HANDLE;
 int    hEMALow = INVALID_HANDLE;
 int    hMACD = INVALID_HANDLE;
 int    hTrendEMA = INVALID_HANDLE;
+
+// Swing-pullback mode state
+ENUM_TIMEFRAMES kBiasTFs[3] = {PERIOD_M30, PERIOD_H1, PERIOD_H4};
+int      hBiasEMA[3] = {INVALID_HANDLE, INVALID_HANDLE, INVALID_HANDLE};
+int      hSwingATR = INVALID_HANDLE;
+datetime g_lastBiasBar = 0;   // H1 bar of the last bias check
+int      g_bias = 0;          // combined bias: 1 buy, -1 sell, 0 wait
+int      g_biasTF[3];         // per-timeframe bias (M30, H1, H4)
+double   g_planSL = 0.0;      // SL of the last placed swing order (initial risk reference)
+double   g_planTP1 = 0.0;     // TP1 of the last placed swing order
 
 datetime lastBarTime = 0;
 double prevUp1 = 0.0, prevDn1 = 0.0;
@@ -277,6 +311,14 @@ bool EnsureHandles()
     hEMALow = iMA(InpSymbol, InpTF, InpCloudLength, 0, MODE_EMA, PRICE_LOW);
   if(InpUseTrendFilter && hTrendEMA == INVALID_HANDLE)
     hTrendEMA = iMA(InpSymbol, InpTrendTF, InpTrendEMALength, 0, MODE_EMA, PRICE_CLOSE);
+  if(InpEntryMode == ENTRY_SWING_PULLBACK)
+  {
+    for(int i = 0; i < 3; i++)
+      if(hBiasEMA[i] == INVALID_HANDLE) hBiasEMA[i] = iMA(InpSymbol, kBiasTFs[i], InpBiasEMALength, 0, MODE_EMA, PRICE_CLOSE);
+    if(hSwingATR == INVALID_HANDLE) hSwingATR = iATR(InpSymbol, InpSwingTF, InpATRPeriod);
+    if(hBiasEMA[0] == INVALID_HANDLE || hBiasEMA[1] == INVALID_HANDLE || hBiasEMA[2] == INVALID_HANDLE || hSwingATR == INVALID_HANDLE)
+      return false;
+  }
   return (hATR != INVALID_HANDLE && hMACD != INVALID_HANDLE && hEMAHigh != INVALID_HANDLE && hEMALow != INVALID_HANDLE);
 }
 
@@ -583,6 +625,245 @@ double GetAccountHistoryProfitAll()
     total += HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
   }
   return total;
+}
+
+//==================================== Swing-pullback entry mode ====================================
+// Most recent confirmed swing highs (highs=true) or lows on tf: a bar whose high is strictly above the
+// `strength` bars on each side (low strictly below). Only closed bars count, so shift >= strength + 1.
+// Fills out[] most recent first, up to `want` prices, and returns how many were found.
+int FindSwings(ENUM_TIMEFRAMES tf, bool highs, int strength, int want, double &out[])
+{
+  ArrayResize(out, 0);
+  double buf[];
+  ArraySetAsSeries(buf, true);
+  int got = highs ? CopyHigh(InpSymbol, tf, 0, 300, buf) : CopyLow(InpSymbol, tf, 0, 300, buf);
+  if(got < strength * 2 + 2) return 0;
+  for(int k = strength + 1; k < got - strength && ArraySize(out) < want; k++)
+  {
+    bool isSwing = true;
+    for(int j = 1; j <= strength && isSwing; j++)
+    {
+      if(highs) isSwing = (buf[k] > buf[k - j] && buf[k] > buf[k + j]);
+      else      isSwing = (buf[k] < buf[k - j] && buf[k] < buf[k + j]);
+    }
+    if(isSwing)
+    {
+      int n = ArraySize(out);
+      ArrayResize(out, n + 1);
+      out[n] = buf[k];
+    }
+  }
+  return ArraySize(out);
+}
+
+// 1 = bullish (last close above a rising EMA, higher high and higher low), -1 = the bearish mirror, 0 = neither.
+int TimeframeBias(int idx)
+{
+  double ema[], close[], hi[], lo[];
+  ArraySetAsSeries(ema, true);
+  ArraySetAsSeries(close, true);
+  if(CopyBuffer(hBiasEMA[idx], 0, 1, 4, ema) != 4) return 0;
+  if(CopyClose(InpSymbol, kBiasTFs[idx], 1, 1, close) != 1) return 0;
+  if(FindSwings(kBiasTFs[idx], true, InpSwingStrength, 2, hi) < 2) return 0;
+  if(FindSwings(kBiasTFs[idx], false, InpSwingStrength, 2, lo) < 2) return 0;
+  if(close[0] > ema[0] && ema[0] > ema[3] && hi[0] > hi[1] && lo[0] > lo[1]) return 1;
+  if(close[0] < ema[0] && ema[0] < ema[3] && hi[0] < hi[1] && lo[0] < lo[1]) return -1;
+  return 0;
+}
+
+int ComputeBias()
+{
+  int bull = 0, bear = 0;
+  for(int i = 0; i < 3; i++)
+  {
+    g_biasTF[i] = TimeframeBias(i);
+    if(g_biasTF[i] > 0) bull++;
+    else if(g_biasTF[i] < 0) bear++;
+  }
+  if(bull >= InpBiasMinAgree && bull > bear) return 1;
+  if(bear >= InpBiasMinAgree && bear > bull) return -1;
+  return 0;
+}
+
+ulong FindPendingOrder()
+{
+  for(int i = OrdersTotal() - 1; i >= 0; i--)
+  {
+    ulong t = OrderGetTicket(i);
+    if(t == 0) continue;
+    if(OrderGetString(ORDER_SYMBOL) != InpSymbol || OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+    long ot = OrderGetInteger(ORDER_TYPE);
+    if(ot == ORDER_TYPE_BUY_LIMIT || ot == ORDER_TYPE_SELL_LIMIT) return t;
+  }
+  return 0;
+}
+
+// Same margin / spread / session gates the breakout entries use.
+bool SwingEntryFiltersPass()
+{
+  if(InpEnableMarginCheck)
+  {
+    double need = 0.0;
+    if(OrderCalcMargin(ORDER_TYPE_BUY, InpSymbol, InpLots, SymbolInfoDouble(InpSymbol, SYMBOL_ASK), need)
+       && AccountInfoDouble(ACCOUNT_MARGIN_FREE) < need * InpMarginBuffer)
+    {
+      Print("Swing: skip, free margin below requirement");
+      return false;
+    }
+  }
+  if(InpMaxSpreadPoints > 0 && SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD) > InpMaxSpreadPoints)
+  {
+    Print("Swing: skip, spread too wide");
+    return false;
+  }
+  if(InpUseSessionFilter)
+  {
+    MqlDateTime ts;
+    TimeToStruct(TimeCurrent(), ts);
+    bool inSession = (InpSessionStartHour <= InpSessionEndHour
+                      ? (ts.hour >= InpSessionStartHour && ts.hour < InpSessionEndHour)
+                      : (ts.hour >= InpSessionStartHour || ts.hour < InpSessionEndHour));
+    if(!inSession)
+    {
+      PrintFormat("Swing: skip, outside session hours [%d,%d)", InpSessionStartHour, InpSessionEndHour);
+      return false;
+    }
+  }
+  return true;
+}
+
+double SwingLots(double entry, double sl, ENUM_ORDER_TYPE ot)
+{
+  double lots = InpLots;
+  double risk = MathAbs(entry - sl);
+  if(InpUseRiskSizing && risk > 0.0)
+  {
+    double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+    double lossPerLot = (risk / tickSize) * tickValue;
+    if(lossPerLot > 0.0) lots = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPercent / 100.0 / lossPerLot;
+  }
+  double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
+  lots = MathFloor(lots / step) * step;
+  lots = MathMax(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN), MathMin(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX), lots));
+  return AdjustLotsByMargin(lots, entry, ot);
+}
+
+// Called once per new H1 bar while flat: cancel the unfilled order from the last check, then place a
+// fresh limit order at the M30 swing in the bias direction.
+void PlanSwingEntry(int bias, bool filtersPass)
+{
+  ulong stale = FindPendingOrder();
+  if(stale != 0)
+  {
+    if(Trade.OrderDelete(stale)) PrintFormat("Swing: cancelled unfilled pending #%I64u at bias re-check", stale);
+    else PrintFormat("Swing: could not cancel pending #%I64u rc=%d", stale, (int)Trade.ResultRetcode());
+  }
+  PrintFormat("Swing bias: M30=%d H1=%d H4=%d -> %d (need %d agreeing)", g_biasTF[0], g_biasTF[1], g_biasTF[2], bias, InpBiasMinAgree);
+  if(bias == 0 || !filtersPass) return;
+
+  double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+  double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+  double minDist = (GetStopsLevelPoints() + 2) * SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+  double atr[1];
+  if(hSwingATR == INVALID_HANDLE || CopyBuffer(hSwingATR, 0, 1, 1, atr) != 1 || atr[0] <= 0.0)
+  {
+    Print("Swing: ATR not ready");
+    return;
+  }
+  double buffer = MathMax(InpSwingSLBufferATR * atr[0], minDist);
+
+  double lows[], highs[];
+  int nl = FindSwings(InpSwingTF, false, InpSwingStrength, 10, lows);
+  int nh = FindSwings(InpSwingTF, true, InpSwingStrength, 10, highs);
+  double entry = 0.0, sl = 0.0, tp1 = 0.0;
+  if(bias > 0)
+  {
+    for(int i = 0; i < nl && entry == 0.0; i++) if(lows[i] < ask - minDist) entry = lows[i];
+    if(entry > 0.0)
+      for(int i = 0; i < nh && tp1 == 0.0; i++) if(highs[i] > entry + minDist) tp1 = highs[i];
+    sl = entry - buffer;
+  }
+  else
+  {
+    for(int i = 0; i < nh && entry == 0.0; i++) if(highs[i] > bid + minDist) entry = highs[i];
+    if(entry > 0.0)
+      for(int i = 0; i < nl && tp1 == 0.0; i++) if(lows[i] < entry - minDist) tp1 = lows[i];
+    sl = entry + buffer;
+  }
+  if(entry <= 0.0 || tp1 <= 0.0)
+  {
+    PrintFormat("Swing: no usable swing for %s (entry=%.2f tp1=%.2f)", bias > 0 ? "BUY" : "SELL", entry, tp1);
+    return;
+  }
+  double risk = MathAbs(entry - sl), reward = MathAbs(tp1 - entry);
+  if(reward < InpSwingMinRR * risk)
+  {
+    PrintFormat("Swing: skip, reward %.2f < %.2f x risk %.2f", reward, InpSwingMinRR, risk);
+    return;
+  }
+  ENUM_ORDER_TYPE ot = (bias > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+  double lots = SwingLots(entry, sl, ot);
+  if(lots <= 0.0)
+  {
+    Print("Swing: skip, not enough margin for the minimum lot");
+    return;
+  }
+  entry = NormalizeDouble(entry, _Digits);
+  sl = NormalizeDouble(sl, _Digits);
+  Trade.SetAsyncMode(false);
+  bool ok = (bias > 0)
+            ? Trade.BuyLimit(lots, entry, InpSymbol, sl, 0.0, ORDER_TIME_GTC, 0, "SwingPullbackBuy")
+            : Trade.SellLimit(lots, entry, InpSymbol, sl, 0.0, ORDER_TIME_GTC, 0, "SwingPullbackSell");
+  if(!ok)
+  {
+    PrintFormat("Swing: order failed rc=%d %s", (int)Trade.ResultRetcode(), Trade.ResultRetcodeDescription());
+    return;
+  }
+  g_planSL = sl;
+  g_planTP1 = tp1;
+  tp1Hit = false;
+  tp2Hit = false;
+  lastTicket = 0;
+  PrintFormat("Swing: placed %s LIMIT %.2f lots @ %.2f sl=%.2f tp1=%.2f (risk %.2f, reward %.2f)",
+              bias > 0 ? "BUY" : "SELL", lots, entry, sl, tp1, risk, reward);
+}
+
+// Swing-mode targets from the stored plan: R = distance from the actual fill to the planned SL, TP1 = the
+// planned opposite swing, TP2/TP3 = the R multiples, pushed out so they always stay beyond the previous level.
+bool SwingTargets(int dir, double entry, double &tp1, double &tp2, double &tp3)
+{
+  if(g_planSL <= 0.0) return false;
+  double r = MathAbs(entry - g_planSL);
+  if(r <= 0.0) return false;
+  double d1 = (g_planTP1 > 0.0 ? MathAbs(g_planTP1 - entry) : InpTP1_R_Mult * r);
+  double d2 = MathMax(InpTP2_R_Mult * r, d1 + r);
+  double d3 = MathMax(InpTP3_R_Mult * r, d2 + r);
+  tp1 = entry + dir * d1;
+  tp2 = entry + dir * d2;
+  tp3 = entry + dir * d3;
+  return true;
+}
+
+string BiasWord(int b)
+{
+  return (b > 0 ? "up" : (b < 0 ? "down" : "flat"));
+}
+
+void SwingHUDLines(string &l1, color &c1, string &l2, string &l3)
+{
+  l1 = StringFormat("Bias M30:%s H1:%s H4:%s -> %s", BiasWord(g_biasTF[0]), BiasWord(g_biasTF[1]), BiasWord(g_biasTF[2]),
+                    g_bias > 0 ? "BUY" : (g_bias < 0 ? "SELL" : "WAIT"));
+  c1 = (g_bias > 0 ? HUD_GREEN : (g_bias < 0 ? HUD_RED : HUD_SUBTEXT));
+  l2 = "No pending order";
+  l3 = " ";
+  ulong t = FindPendingOrder();
+  if(t != 0 && OrderSelect(t))
+  {
+    bool isBuy = (OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_LIMIT);
+    l2 = StringFormat("%s LIMIT @ %s", isBuy ? "BUY" : "SELL", DoubleToString(OrderGetDouble(ORDER_PRICE_OPEN), _Digits));
+    l3 = StringFormat("SL %s   TP1 %s", DoubleToString(OrderGetDouble(ORDER_SL), _Digits), DoubleToString(g_planTP1, _Digits));
+  }
 }
 
 //---------- small object-creation helpers (every HUD object: HUD_Z z-order, foreground, locked) ----------
@@ -1011,6 +1292,16 @@ void UpdateStatsTab()
     ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT,
       StringFormat("TP1: %s   TP2: %s", (tp1Hit ? "hit" : "pending"), (tp2Hit ? "hit" : "pending")));
   }
+  else if(InpEntryMode == ENTRY_SWING_PULLBACK)
+  {
+    string l1, l2, l3;
+    color c1;
+    SwingHUDLines(l1, c1, l2, l3);
+    ObjectSetString(0, HUD_PREFIX + "S_POS1", OBJPROP_TEXT, l1);
+    ObjectSetInteger(0, HUD_PREFIX + "S_POS1", OBJPROP_COLOR, (long)c1);
+    ObjectSetString(0, HUD_PREFIX + "S_POS2", OBJPROP_TEXT, l2);
+    ObjectSetString(0, HUD_PREFIX + "S_POS3", OBJPROP_TEXT, l3);
+  }
   else
   {
     ObjectSetString(0, HUD_PREFIX + "S_POS1", OBJPROP_TEXT, "No open position");
@@ -1329,6 +1620,21 @@ void OnTick()
     }
   }
 
+  // Swing-pullback mode: the breakout market entries above are switched off. At each new H1 bar the
+  // M30/H1/H4 bias is re-checked and, while flat, the pending order is re-planned.
+  if(InpEntryMode == ENTRY_SWING_PULLBACK)
+  {
+    buySignal = false;
+    sellSignal = false;
+    datetime h1Bar = iTime(InpSymbol, PERIOD_H1, 0);
+    if(h1Bar != 0 && h1Bar != g_lastBiasBar)
+    {
+      g_lastBiasBar = h1Bar;
+      g_bias = ComputeBias();
+      if(posDir == 0) PlanSwingEntry(g_bias, SwingEntryFiltersPass());
+    }
+  }
+
   // entries only on new bar to avoid whipsaw
   if(newBar && InpOnlyOnePosition && posDir == 0)
   {
@@ -1524,6 +1830,8 @@ void OnTick()
         double slPct = (InpStopLossPercent > 0.0 ? InpStopLossPercent / 100.0 : 0.0);
         if(slPct > 0.0) DrawLine("SL", (posDir == 1 ? curEntry * (1.0 - slPct) : curEntry * (1.0 + slPct)), clrRed);
       }
+      if(InpEntryMode == ENTRY_SWING_PULLBACK && SwingTargets(posDir, curEntry, tp1, tp2, tp3))
+        DrawLine("SL", g_planSL, clrRed);
       DrawLine("TP1", tp1, clrGreen);
       DrawLine("TP2", tp2, clrGreen);
       DrawLine("TP3", tp3, clrGreen);
@@ -1546,6 +1854,8 @@ void OnTick()
         tp2 = (posDir == 1 ? curEntry * (1.0 + 2.0 * slPct) : curEntry * (1.0 - 2.0 * slPct));
         tp3 = (posDir == 1 ? curEntry * (1.0 + 3.0 * slPct) : curEntry * (1.0 - 3.0 * slPct));
       }
+
+      if(InpEntryMode == ENTRY_SWING_PULLBACK) SwingTargets(posDir, curEntry, tp1, tp2, tp3);
 
       // capture the ticket if not set
       if(lastTicket == 0)
@@ -1648,6 +1958,9 @@ void OnDeinit(const int reason)
   if(hEMAHigh != INVALID_HANDLE)  { IndicatorRelease(hEMAHigh);hEMAHigh = INVALID_HANDLE; }
   if(hEMALow != INVALID_HANDLE)   { IndicatorRelease(hEMALow); hEMALow = INVALID_HANDLE; }
   if(hTrendEMA != INVALID_HANDLE) { IndicatorRelease(hTrendEMA); hTrendEMA = INVALID_HANDLE; }
+  for(int i = 0; i < 3; i++)
+    if(hBiasEMA[i] != INVALID_HANDLE) { IndicatorRelease(hBiasEMA[i]); hBiasEMA[i] = INVALID_HANDLE; }
+  if(hSwingATR != INVALID_HANDLE) { IndicatorRelease(hSwingATR); hSwingATR = INVALID_HANDLE; }
   
   int markers = 0, markersFront = 0;
   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; --i)

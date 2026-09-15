@@ -35,7 +35,7 @@ def parse_one(path):
     orders = orders.dropna(subset=["order"])
     orders["order"] = pd.to_numeric(orders["order"], errors="coerce")
     orders["sl"] = pd.to_numeric(orders["sl"], errors="coerce")
-    entry_orders = orders[orders["comment"].astype(str).str.startswith("ATRRegime")].copy()
+    entry_orders = orders[orders["comment"].astype(str).str.startswith(("ATRRegime", "SwingPullback"))].copy()
     entry_orders = entry_orders.set_index("order")["sl"]
 
     deals = t.iloc[deals_hdr + 2:].copy()

@@ -2,6 +2,29 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.14] - 2026-09-15
+Optional swing-pullback entry mode, built from the user's manual trading method.
+
+- New input `InpEntryMode`: `ENTRY_REGIME_BREAKOUT` (default, behavior unchanged)
+  or `ENTRY_SWING_PULLBACK`.
+- Swing mode bias, per timeframe on M30/H1/H4: last close vs an EMA
+  (`InpBiasEMALength`, default 50) sloping the same way, plus higher highs and
+  higher lows (or lower highs and lower lows). `InpBiasMinAgree` (default 2)
+  timeframes must agree.
+- Re-checked at every new H1 bar: any unfilled pending order is cancelled, then
+  a limit order is placed at the latest `InpSwingTF` (default M30) swing low for
+  a buy or swing high for a sell. SL = swing -/+ `InpSwingSLBufferATR` x ATR
+  (default 0.3); TP1 = the opposite swing; TP2/TP3 from the stored risk
+  distance; skipped if TP1 < `InpSwingMinRR` x risk. Uses the existing margin,
+  spread and session filters; ignores the breakout and trend-filter inputs.
+- HUD open-position section shows the per-timeframe bias and the pending order
+  while flat.
+- Tested against breakout mode on the same 4 weeks with $500 (see JOURNAL.md):
+  1 trade/day vs 15.8 and max drawdown 0.7-3.4% vs 17.8-27.9%, but only 20
+  trades -- too few to judge. The stop is too tight (median loser stopped in
+  7 min) and 87% of limit orders were cancelled unfilled. Not yet a
+  recommended live setting.
+
 ## [1.13] - 2026-09-15
 Full HUD rewrite, requested after the user found the previous panel "ugly
 and not very informative" and pointed out its Entry/SL/TP price lines
