@@ -2,6 +2,36 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.16] - 2026-09-15
+Pro trader review, round 1 (`reviews/2026-09-15-pro-trader-review.md`). Default inputs keep
+v1.15 trading behavior.
+
+- **Bugfix, hedging accounts:** `MoveSLto()` (trailing stop and stairstep lock) selected the
+  position with `PositionSelect(symbol)`, which on a hedging account returns the lowest-ticket
+  position of the symbol -- a manual trade if one was opened first -- and applied that
+  position's type and TP to the EA's own position. Tester proof with a harness that opens a
+  manual SELL before the EA trades (Jun 23-24 2026): every EA SELL (22 positions) got the
+  manual trade's TP copied onto it, about 4,300 stop modifications were sent in 2 days because
+  the 500-point step guard compared against the manual stop, and 13 were rejected as invalid
+  stops. The manual position itself was never modified or closed. It now selects the EA's own
+  position by symbol and magic number and modifies it by ticket.
+- New input `InpBreakoutClosedBar` (default false): breakout mode evaluates the regime channel,
+  midline/band cross and trend flip on closed bars, with the channel rebuilt from the last 300
+  closed bars each bar. Default false keeps the v1.15 signal (first tick of the new bar vs the
+  previous close).
+- New inputs `InpSwingEntryStyle` (default: limit order at the swing, as v1.15) and
+  `InpSwingSweepMaxATR` (default 1.0): optional confirmation entry for swing mode -- watch the
+  swing level, and after price sweeps it, enter on the first M5 close back on the bias side
+  with the stop beyond the sweep; drop the setup if the sweep runs more than 1.0 x ATR(M30).
+- `swing_log_summary.py` also reports the confirmation-entry flow (armed, sweeps, entries,
+  disarm reasons).
+- Tested (real ticks, $500, user's inputs, 12 in-sample weeks Jun 22 - Sep 11; JOURNAL.md):
+  default inputs reproduce v1.15 trades exactly (4 of 4 week/mode runs). Confirmation entry:
+  56 trades, PF 1.01, +$2.30 (v1.15 swing: 77, PF 0.72, -$55.80); fast stop-outs fell from 55%
+  to 11% of losers, but no edge. Closed-bar regime flip: 124 trades, PF 1.01, +$6.88, weekly
+  drawdown 12.3% (v1.15 breakout: 943, PF 0.93, -$300.18, 50%). Neither passed the promotion
+  criteria, so both stay off by default and neither is a recommended setting.
+
 ## [1.15] - 2026-09-15
 Swing-mode order handling, requested by the user after the v1.14 comparison.
 

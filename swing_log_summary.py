@@ -41,7 +41,8 @@ def parse_log(path, since, until):
             m = re.search(r",(\w+): testing of .* from (\d{4}\.\d{2}\.\d{2})", msg)
             cur = {"start": rt, "tf": m.group(1) if m else "?", "from": m.group(2) if m else "?", "mode": None,
                    "bias": Counter(), "placed": 0, "kept": 0, "cancelled": 0, "cancel_reasons": Counter(),
-                   "triggered": 0, "skips": Counter(), "samples": []}
+                   "triggered": 0, "skips": Counter(), "samples": [], "style": "0", "armed": 0, "kept_armed": 0,
+                   "sweeps": 0, "disarmed": Counter(), "confirm_entries": 0}
             if since <= rt[:5] <= until:
                 runs.append(cur)
             continue
@@ -50,6 +51,26 @@ def parse_log(path, since, until):
         s = msg.strip()
         if s.startswith("InpEntryMode="):
             cur["mode"] = s.split("=", 1)[1]
+        elif s.startswith("InpSwingEntryStyle="):
+            cur["style"] = s.split("=", 1)[1]
+        elif "Swing: armed" in msg:
+            cur["armed"] += 1
+            if len(cur["samples"]) < 3:
+                cur["samples"].append(s)
+        elif "Swing: keeping armed" in msg:
+            cur["kept_armed"] += 1
+        elif "Swing: sweep started" in msg:
+            cur["sweeps"] += 1
+        elif "Swing: disarmed" in msg:
+            r = re.search(r"\(([^)]+)\)\s*$", msg)
+            reason = r.group(1) if r else "?"
+            if reason.startswith("reward"):
+                reason = "reward < min R:R at confirmation"
+            elif reason.startswith("order failed"):
+                reason = "order failed"
+            cur["disarmed"][reason.split(":")[0]] += 1
+        elif "Swing confirm: entered" in msg:
+            cur["confirm_entries"] += 1
         elif "Swing bias:" in msg:
             b = re.search(r"-> (-?\d)", msg)
             cur["bias"][{"1": "BUY", "-1": "SELL", "0": "WAIT"}.get(b.group(1) if b else "", "?")] += 1
@@ -90,6 +111,9 @@ def main():
               f"BUY {r['bias']['BUY']}, SELL {r['bias']['SELL']}, WAIT {r['bias']['WAIT']}")
         print(f"  orders placed {r['placed']}, kept at a check {r['kept']}, filled {r['triggered']}, "
               f"cancelled unfilled {r['cancelled']} {dict(r['cancel_reasons']) if r['cancel_reasons'] else ''}")
+        if r["style"] == "1" or r["armed"]:
+            print(f"  confirm style: armed {r['armed']}, kept armed at a check {r['kept_armed']}, sweeps {r['sweeps']}, "
+                  f"entries {r['confirm_entries']}, disarmed {dict(r['disarmed']) if r['disarmed'] else 0}")
         print(f"  skips: {dict(r['skips']) if r['skips'] else 'none'}")
         for smp in r["samples"]:
             print(f"  sample: {smp}")

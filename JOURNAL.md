@@ -644,3 +644,160 @@ rate 38.5% (v1.14: 12%).
   the swing zone, wait for an M5 candle to close back on the bias side of the
   level (a rejection) before entering, with the stop beyond that candle's wick.
   Aimed at finding 4: the 34 trades stopped within 5 minutes.
+
+
+---
+
+## 2026-09-15 -- Pro trader review, round 1: data split and pre-registrations
+
+Full review: `reviews/2026-09-15-pro-trader-review.md`.
+
+**Data split, fixed before any run in this round:**
+- In-sample (IS): the 12 full weeks Jun 22 - Sep 11, 2026 (already seen many times).
+- Validation: the 12 weeks Mar 2 - May 22, 2026 (never analyzed). Only for
+  candidates that pass IS.
+- Holdout: the 8 weeks Jan 5 - Feb 27, 2026. Touched only by a 2-day
+  data-availability run (Jan 5-7) earlier today, no strategy analysis. Run only
+  for a candidate that also passes validation.
+
+**Settings for every run:** real ticks (`Model=4`), $500 at the start of each
+week, fixed 0.01 lot, the user's inputs (`ini_runs/visualcheck_H1_20260907.ini`),
+build v1.16 with new inputs at their defaults unless stated.
+
+**Multiple testing:** at least 5 ideas were already tried on the IS weeks (v1.14
+swing mode, stop buffer, order distance, kept orders, session/weekday split), so
+the IS bar is raised from PF 1.15 to **PF >= 1.25**.
+
+**Default-behavior check:** v1.16 with default inputs must reproduce the stored
+v1.15 trades (`mt5_modecompare_v115_12wk_trades.csv`) on 2 IS weeks (Jun 22,
+Jul 6) in both modes before the stored 12-week baseline is used.
+
+### Experiment E1 -- swing confirmation entry, sweep and reclaim (pre-registered 2026-09-15)
+- **Hypothesis:** swing-mode limit orders fill while price pushes through the
+  swing (v1.15 IS: 56 of 77 trades hit the initial stop after a median 3.9 min,
+  -$190.63). Waiting until price sweeps the swing and an M5 candle closes back on
+  the bias side filters out the pushes that keep going. It is the user's own
+  last step: go back to M5 to find the entry.
+- **Change:** `InpSwingEntryStyle=1` (new; default 0 = v1.15 limit orders). Same
+  bias, same swing level and keep/cancel rules, but the level is "armed" instead
+  of getting a limit order. On each closed M5 bar: once price has traded beyond
+  the level (the sweep), the first M5 close back on the bias side enters at
+  market. SL = the most extreme price of the sweep -/+ `InpSwingSLBufferATR`
+  (0.3) x ATR(M30); TP1 = the planned opposite swing; skipped if TP1 <
+  `InpSwingMinRR` (1.0) x risk. The setup is dropped if the sweep goes more than
+  `InpSwingSweepMaxATR` (1.0, fixed, not tuned) x ATR(M30) beyond the level.
+  Spread/session/margin filters are checked at entry. TP ladder, stairstep lock
+  and trailing unchanged.
+- **Baseline:** v1.15 swing, IS 12 weeks: 77 trades, PF 0.72, -$55.80, 4 of 12
+  weeks positive, worst weekly DD 4.8%.
+- **Weeks:** IS; validation only if promoted; holdout untouched.
+- **Primary metric:** pooled IS net $ and PF.
+- **Pass (promote to validation):** PF >= 1.25 and net > 0; better than the
+  baseline's net in >= 8 of 12 weeks; worst weekly DD <= 6.0%; >= 80 trades. If
+  it has < 80 trades but passes everything else, the sample is too small to
+  judge: run validation and require validation PF >= 1.10 with >= 80 trades
+  pooled over IS + validation.
+- **Specific target:** losers stopped within 5 minutes fall by at least a third
+  (baseline 34 of 62 losers, 55%).
+- **Falsified if:** PF < 1.0, or fast stop-outs don't fall.
+
+### Experiment E2 -- closed-bar regime flip for breakout mode (pre-registered 2026-09-15)
+- **Hypothesis:** breakout mode's signal is the first tick of each M15 bar vs the
+  previous close (verified), a near-random entry in the H1 EMA200 direction. Its
+  loss (-$300.18 on 943 trades) is about the spread paid (943 x $0.26 = $245).
+  Entering only when the ATR regime channel (ATR 14 x 2.0, SuperTrend-style)
+  flips on a closed M15 bar in the H1 EMA200 direction -- a pullback against the
+  higher-timeframe trend has ended -- should cut trades by more than 70% and give
+  entries that carry information.
+- **Change:** `InpBreakoutClosedBar=true` (new; default false = v1.15) with the
+  existing `InpUseMidlineBreakout=false` and `InpRequireTrendFlip=true`, so the
+  signal is the closed-bar channel flip. The channel is rebuilt from the last 300
+  closed M15 bars at every bar. Stop, TP ladder, stairstep lock, trailing and
+  trend filter unchanged. (A closed-bar midline cross is also implemented but not
+  tested: a bar closing above its own midpoint is still close to random.)
+- **Baseline:** v1.15 breakout, IS 12 weeks: 943 trades, PF 0.93, -$300.18, 6 of
+  12 weeks positive, worst weekly DD 50.0%.
+- **Weeks / primary metric:** as E1.
+- **Pass:** PF >= 1.25 and net > 0; better than baseline net in >= 8 of 12 weeks;
+  worst weekly DD <= 62.5%; >= 80 trades.
+- **Specific target:** <= 5 trades/day.
+- **Falsified if:** PF stays <= 1.0 with far fewer trades -- then the loss is not
+  only overtrading, and the M15 regime flip has no edge on its own.
+
+### Checks before the experiments (2026-09-15)
+- **Default behavior:** v1.16 with default inputs reproduced the stored v1.15 trades exactly
+  (entry/exit times, prices, P/L) on Jun 22 and Jul 6 in both modes: breakout 82 + 82 trades
+  (+$64.36, -$222.05), swing 5 + 7 trades (-$0.07, -$14.21). The stored 12-week v1.15 results
+  are the baseline for E1 and E2.
+- **Hedging account (code audit):** a harness build opened a manual SELL (magic 777) before the
+  EA traded, Jun 23-24. v1.15: the manual position was never modified or closed, but all 22 EA
+  SELL positions got its TP copied onto them, ~4,300 stop modifications were sent and 13 were
+  rejected as invalid stops (`MoveSLto()` read the position via `PositionSelect(symbol)`).
+  v1.16: 0 copied TPs, 0 failed modifications, same 36 EA entries.
+- **Orders without a stop:** 0 of 6,570 logged entries (`sl=0.00`) and 0 of 2,068 stored trades.
+- **Small-account capture:** 0 captures in every $100 run (50% of 0.01 lot rounds to 0).
+- **Smoke tests (Aug 10, 1 week each):** the tester log showed the overrides applied and the new
+  logic running (E1: 19 levels armed, 8 sweeps, 5 entries; E2: 452 closed-bar evaluations, 9
+  entries). One week, not evidence.
+
+### E1 result -- swing confirmation entry, IS 12 weeks: FAILED promotion
+Tester log: all 12 runs show `InpEntryMode=1 InpSwingEntryStyle=1 InpSwingSweepMaxATR=1.0`, a
+ticks line and a final balance. Trades: `review-scratch` batch E1is (summarized here).
+
+| 12 weeks IS | Trades | Win% | Net $ | PF | Avg win / loss $ | Weeks + | Better than baseline | Worst weekly DD | Losers stopped <= 5 min | Median loser hold |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Baseline swing v1.15 | 77 | 19.5 | -55.80 | 0.72 | 9.66 / -3.24 | 4 | -- | 4.8% | 34 of 62 (55%) | 4.6 min |
+| E1 confirm entry | 56 | 33.9 | +2.30 | 1.01 | 11.57 / -5.88 | 5 | 6 of 12 | 5.3% | 4 of 37 (11%) | 34.8 min |
+
+Weekly net $ (Jun 22 ... Sep 7): -19.64, +10.72, -9.08, +13.31, -7.21, -15.32, +8.46, +8.41,
+-11.22, +49.97, -14.00, -12.10. Flow over 12 weeks: 191 levels armed, 71 sweeps, 56 entries,
+13 dropped as too deep, 2 skipped for reward < 1R.
+
+- The mechanism works as intended: fast stop-outs fell from 55% to 11% of losers, win rate rose
+  from 19.5% to 33.9%, and the pooled result went from -$55.80 to +$2.30.
+- But the stop is now beyond the sweep (average risk $8.09 vs $3.49), so avg loss doubled, and
+  there is no edge: PF 1.01, expectancy +$0.04/trade, better than baseline in only 6 of 12 weeks,
+  and +$49.97 of the profit comes from one week (Aug 24). Criteria failed: trades (56 < 80),
+  PF (< 1.25), weeks better (6 < 8). Not falsified (PF >= 1.0), but not promoted.
+- No session pattern to act on: Asia 21 trades PF 0.90, London 17 PF 0.88, overlap 11 PF 1.03,
+  NY afternoon 6 PF 1.78.
+
+### E2 result -- closed-bar regime flip (breakout mode), IS 12 weeks: FAILED promotion
+Tester log: all 12 runs show `InpBreakoutClosedBar=true InpUseMidlineBreakout=false
+InpRequireTrendFlip=true`, closed-bar evaluations on every M15 bar and a ticks line.
+
+| 12 weeks IS | Trades | Trades/day | Win% | Net $ | PF | Avg win / loss $ | Weeks + | Better than baseline | Worst weekly DD |
+|---|---|---|---|---|---|---|---|---|---|
+| Baseline breakout v1.15 | 943 | 15.7 | 34.4 | -300.18 | 0.93 | 12.34 / -6.94 | 6 | -- | 50.0% |
+| E2 closed-bar flip | 124 | 2.1 | 36.3 | +6.88 | 1.01 | 12.01 / -6.75 | 7 | 7 of 12 | 12.3% |
+
+Weekly net $: +3.91, +18.52, -61.52, -37.40, +5.95, -39.26, +22.97, +99.61, +12.45, +23.18,
+-22.48, -19.05. Exits: 48 initial stops -$420.46, 20 TP3 closes +$433.03, 56 trailed/locked
+exits -$5.69.
+
+- Trades fell 87% (target met: 2.1/day), the weekly drawdown fell from 50% to 12.3%, and the
+  -$300 loss disappeared -- roughly the spread no longer paid.
+- The entries still carry no edge: PF 1.01, win rate and payoff almost identical to the random
+  baseline (36.3% vs 34.4%; avg win/loss 1.78 vs 1.78). Aug 10 alone made +$99.61 (the 1-week
+  smoke result was that week). Criteria failed: PF (< 1.25), weeks better (7 < 8).
+- Consistent with the hypothesis's falsification branch: the loss was overtrading, and the M15
+  regime flip on its own has no edge.
+
+### E3 -- not run (screening said no)
+Candidate: take the E2 regime flip only when the swing-mode M30/H1/H4 bias agrees (the user's
+top-down method applied to the breakout trigger). **Screening only, not evidence:** the 124 real
+E2 trades split by the hourly bias logged in the E1 runs (same weeks; ignores that skipped trades
+could free time for others): bias agrees 23 trades, PF 1.05, +$4.29; bias WAIT 90 trades, PF
+1.09, +$35.87; bias against 11 trades, PF 0.40, -$33.28. A bias-aligned version would have ~23
+trades in 12 weeks and no sign of edge; dropping only the 11 "against" trades would be fitting
+noise. With ~8 ideas now tried on these weeks, no third tester experiment was run this round.
+
+### Round conclusion
+- Promoted: none. Validation weeks (Mar 2 - May 22) and the holdout (Jan 5 - Feb 27) remain
+  unused for strategy decisions.
+- Ideas tried on the IS weeks so far: ~8 (v1.14 swing, stop buffer, order distance, kept orders,
+  session/weekday split, E1, E2, E3 screen). The next round needs a clear prior reason and a
+  higher IS bar, or new data.
+- Kept in the code, default off: `InpSwingEntryStyle`, `InpSwingSweepMaxATR`,
+  `InpBreakoutClosedBar`. Kept and verified: the hedging `MoveSLto()` fix.
+- Trades: `mt5_review_E1E2_12wk_trades.csv` (mode `swing_confirm_E1` / `breakout_closedbar_E2`).

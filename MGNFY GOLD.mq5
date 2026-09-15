@@ -56,9 +56,21 @@
 //|  sits on changes, or price is more than InpSwingMaxDistATR x ATR |
 //|  away. New orders only use swings within that distance.          |
 //+------------------------------------------------------------------+
+//| v1.16 (2026-09-15): pro trader review round 1                    |
+//|  - MoveSLto() now selects this EA's own position (symbol+magic). |
+//|    PositionSelect(symbol) on a hedging account picks the lowest  |
+//|    ticket of the symbol, which can be a manual trade; its type   |
+//|    and TP were then applied to the EA's own position.            |
+//|  - InpBreakoutClosedBar (default false): evaluate the regime      |
+//|    channel, midline/band cross and trend flip on closed bars.     |
+//|  - InpSwingEntryStyle (default limit): optional confirmation      |
+//|    entry -- wait for a sweep of the swing and an M5 close back on |
+//|    the bias side, stop beyond the sweep.                          |
+//|  Defaults keep v1.15 behavior.                                    |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.15"
+#property version   "1.16"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -73,6 +85,12 @@ enum ENUM_ENTRY_MODE
 {
   ENTRY_REGIME_BREAKOUT = 0, // Regime breakout (market orders)
   ENTRY_SWING_PULLBACK  = 1  // Swing pullback (limit orders, M30/H1/H4 bias)
+};
+
+enum ENUM_SWING_ENTRY_STYLE
+{
+  SWING_LIMIT_AT_SWING  = 0, // Limit order at the swing (v1.15)
+  SWING_CONFIRM_RECLAIM = 1  // Wait for a sweep of the swing and an M5 close back on the bias side
 };
 
 //-------------------- Inputs --------------------
@@ -112,6 +130,7 @@ input double   InpRiskPercent          = 1.0;             // Risk percent of equ
 input bool     InpRequireTrendFlip     = false;           // If false, enter on direct band/midline break (more entries)
 input int      InpBreakoutConfirmBars  = 1;               // Bars to confirm breakout (1 = close1 inside, close0 outside)
 input bool     InpUseMidlineBreakout   = true;            // If true, use hlMid breakout instead of band breakout
+input bool     InpBreakoutClosedBar    = false;           // Breakout mode: evaluate channel, midline/band cross and trend flip on closed bars (false = v1.15 first-tick behavior)
 
 // Entry style
 input ENUM_ENTRY_MODE InpEntryMode     = ENTRY_REGIME_BREAKOUT; // Entry style (swing pullback ignores the breakout and trend-filter inputs)
@@ -123,6 +142,8 @@ input double   InpSwingSLBufferATR     = 0.3;             // Swing mode: SL beyo
 input double   InpSwingMinRR           = 1.0;             // Swing mode: skip if TP1 distance < this x SL distance
 input double   InpSwingMaxDistATR      = 3.0;             // Swing mode: only use swings within this x ATR(swing TF) of price (0 = no limit)
 input bool     InpSwingCancelOnWait    = false;           // Swing mode: also cancel the pending order when the bias turns neutral
+input ENUM_SWING_ENTRY_STYLE InpSwingEntryStyle = SWING_LIMIT_AT_SWING; // Swing mode: limit order at the swing, or wait for a sweep and an M5 close back on the bias side
+input double   InpSwingSweepMaxATR     = 1.0;             // Swing confirm entry: drop the setup if price goes beyond the swing by more than this x ATR(swing TF)
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
@@ -171,6 +192,13 @@ int      g_bias = 0;          // combined bias: 1 buy, -1 sell, 0 wait
 int      g_biasTF[3];         // per-timeframe bias (M30, H1, H4)
 double   g_planSL = 0.0;      // SL of the last placed swing order (initial risk reference)
 double   g_planTP1 = 0.0;     // TP1 of the last placed swing order
+// Swing confirm-entry state (InpSwingEntryStyle = SWING_CONFIRM_RECLAIM)
+int      g_armDir = 0;          // 1 = watching a swing low for a buy, -1 = a swing high for a sell, 0 = nothing armed
+double   g_armLevel = 0.0;      // the swing level being watched
+double   g_armTP1 = 0.0;        // opposite swing (TP1) when armed
+double   g_sweepExt = 0.0;      // most extreme price beyond the level since the sweep started (0 = no sweep yet)
+datetime g_armTime = 0;         // when the level was armed; only M5 bars closing after this count
+datetime g_lastConfirmBar = 0;  // last M5 bar processed
 
 datetime lastBarTime = 0;
 double prevUp1 = 0.0, prevDn1 = 0.0;
@@ -351,6 +379,54 @@ bool CopyLatest(double &close0, double &close1, double &hlMid, double &atr0, dou
   macd1  = macdMain[1];
   emaHigh0 = emaH[0];
   emaLow0  = emaL[0];
+  return true;
+}
+
+// v1.16, InpBreakoutClosedBar: the regime channel (SuperTrend-style: hl2 +/- InpATRMultiplier x ATR, bands trailing
+// while price stays on their side, trend flips when a close crosses the previous bar's opposite band) computed on
+// closed InpTF bars only. Rebuilt from the last 300 closed bars each call, so it does not depend on when the EA was
+// attached. Outputs are for bar 1 (just closed); upPrev/dnPrev/trend2 are the values as of bar 2.
+bool ClosedBarRegime(double &mid1, double &upPrev, double &dnPrev, double &close1, double &close2, double &close3,
+                     int &trend1, int &trend2)
+{
+  MqlRates r[];
+  double atr[];
+  ArraySetAsSeries(r, true);
+  ArraySetAsSeries(atr, true);
+  int got = CopyRates(InpSymbol, InpTF, 1, 301, r);
+  if(got < 50) return false;
+  if(CopyBuffer(hATR, 0, 1, got, atr) != got) return false;
+  bool init = false;
+  double up = 0.0, dn = 0.0, pUp = 0.0, pDn = 0.0;
+  int tr = 1, pTr = 1;
+  for(int i = got - 1; i >= 0; i--)
+  {
+    if(atr[i] <= 0.0 || atr[i] == EMPTY_VALUE) continue;
+    double src = (r[i].high + r[i].low) * 0.5;
+    double lb = src - InpATRMultiplier * atr[i];
+    double ub = src + InpATRMultiplier * atr[i];
+    if(!init || i == got - 1)
+    {
+      up = lb; dn = ub; tr = 1; pUp = up; pDn = dn; pTr = tr;
+      init = true;
+      continue;
+    }
+    pUp = up; pDn = dn; pTr = tr;
+    double prevClose = r[i + 1].close;
+    if(tr == -1 && r[i].close > pDn) tr = 1;
+    else if(tr == 1 && r[i].close < pUp) tr = -1;
+    up = (prevClose > pUp ? MathMax(lb, pUp) : lb);
+    dn = (prevClose < pDn ? MathMin(ub, pDn) : ub);
+  }
+  if(!init || got < 3) return false;
+  mid1 = (r[0].high + r[0].low) * 0.5;
+  upPrev = pUp;
+  dnPrev = pDn;
+  trend1 = tr;
+  trend2 = pTr;
+  close1 = r[0].close;
+  close2 = r[1].close;
+  close3 = r[2].close;
   return true;
 }
 
@@ -821,6 +897,142 @@ bool BuildSwingPlan(int bias, double atr, double &entry, double &sl, double &tp1
   return true;
 }
 
+//---------------- Swing confirm entry (InpSwingEntryStyle = SWING_CONFIRM_RECLAIM) ----------------
+// A trader does not leave a limit order exactly at an obvious swing: price is often pushed through it to take
+// the stops there. Instead the level is watched ("armed"); once price has traded beyond it (the sweep), the
+// first closed M5 bar back on the bias side is the entry, with the stop beyond the most extreme price of the
+// sweep. If price runs more than InpSwingSweepMaxATR x ATR beyond the level it is a breakdown, not a sweep.
+void SwingDisarm(string why)
+{
+  if(g_armDir != 0 && why != "")
+    PrintFormat("Swing: disarmed %s @ %.2f (%s)", g_armDir > 0 ? "BUY" : "SELL", g_armLevel, why);
+  g_armDir = 0;
+  g_armLevel = 0.0;
+  g_armTP1 = 0.0;
+  g_sweepExt = 0.0;
+}
+
+// Hourly: same keep/cancel rules as the limit order, except that a level whose sweep is in progress is kept
+// until that sweep resolves.
+void PlanSwingConfirm(int bias, bool havePlan, double level, double tp1, double atr)
+{
+  if(g_armDir != 0)
+  {
+    double price = (g_armDir > 0 ? SymbolInfoDouble(InpSymbol, SYMBOL_ASK) : SymbolInfoDouble(InpSymbol, SYMBOL_BID));
+    string why = "";
+    if(bias == -g_armDir) why = "bias flipped";
+    else if(bias == 0 && InpSwingCancelOnWait) why = "bias turned neutral";
+    else if(g_sweepExt > 0.0) why = "";
+    else if(InpSwingMaxDistATR > 0.0 && MathAbs(price - g_armLevel) > InpSwingMaxDistATR * atr) why = "too far from price";
+    else if(bias == g_armDir && havePlan && MathAbs(level - g_armLevel) >= _Point) why = "swing level changed";
+    if(why == "")
+    {
+      PrintFormat("Swing: keeping armed %s @ %.2f%s", g_armDir > 0 ? "BUY" : "SELL", g_armLevel, g_sweepExt > 0.0 ? " (sweep in progress)" : "");
+      return;
+    }
+    SwingDisarm(why);
+  }
+  if(!havePlan) return;
+  g_armDir = bias;
+  g_armLevel = level;
+  g_armTP1 = tp1;
+  g_sweepExt = 0.0;
+  g_armTime = TimeCurrent();
+  PrintFormat("Swing: armed %s @ %.2f tp1=%.2f (waiting for a sweep and an M5 close back %s the level)",
+              bias > 0 ? "BUY" : "SELL", level, tp1, bias > 0 ? "above" : "below");
+}
+
+// On each new M5 bar while flat: track the sweep of the armed level and enter on the first close back.
+void SwingConfirmCheck()
+{
+  datetime m5 = iTime(InpSymbol, PERIOD_M5, 0);
+  if(m5 == 0 || m5 == g_lastConfirmBar) return;
+  g_lastConfirmBar = m5;
+  if(g_armDir == 0) return;
+  datetime barTime = iTime(InpSymbol, PERIOD_M5, 1);
+  if(barTime + PeriodSeconds(PERIOD_M5) <= g_armTime) return;   // closed before the level was armed
+  double hi = iHigh(InpSymbol, PERIOD_M5, 1), lo = iLow(InpSymbol, PERIOD_M5, 1), cl = iClose(InpSymbol, PERIOD_M5, 1);
+  double atr[1];
+  if(hi <= 0.0 || lo <= 0.0 || cl <= 0.0) return;
+  if(hSwingATR == INVALID_HANDLE || CopyBuffer(hSwingATR, 0, 1, 1, atr) != 1 || atr[0] <= 0.0) return;
+  double maxBeyond = InpSwingSweepMaxATR * atr[0];
+
+  if(g_armDir > 0)
+  {
+    if(lo < g_armLevel)
+    {
+      if(g_sweepExt <= 0.0) PrintFormat("Swing: sweep started below %.2f (M5 low %.2f)", g_armLevel, lo);
+      g_sweepExt = (g_sweepExt > 0.0 ? MathMin(g_sweepExt, lo) : lo);
+    }
+    if(g_sweepExt <= 0.0) return;
+    if(InpSwingSweepMaxATR > 0.0 && g_armLevel - g_sweepExt > maxBeyond)
+    {
+      SwingDisarm(StringFormat("sweep too deep: %.2f beyond", g_armLevel - g_sweepExt));
+      return;
+    }
+    if(cl <= g_armLevel) return;
+  }
+  else
+  {
+    if(hi > g_armLevel)
+    {
+      if(g_sweepExt <= 0.0) PrintFormat("Swing: sweep started above %.2f (M5 high %.2f)", g_armLevel, hi);
+      g_sweepExt = (g_sweepExt > 0.0 ? MathMax(g_sweepExt, hi) : hi);
+    }
+    if(g_sweepExt <= 0.0) return;
+    if(InpSwingSweepMaxATR > 0.0 && g_sweepExt - g_armLevel > maxBeyond)
+    {
+      SwingDisarm(StringFormat("sweep too deep: %.2f beyond", g_sweepExt - g_armLevel));
+      return;
+    }
+    if(cl >= g_armLevel) return;
+  }
+
+  // The closed M5 bar is back on the bias side after a sweep: confirmation.
+  int dir = g_armDir;
+  double buffer = MathMax(InpSwingSLBufferATR * atr[0], (GetStopsLevelPoints() + 2) * SymbolInfoDouble(InpSymbol, SYMBOL_POINT));
+  double entry = (dir > 0 ? SymbolInfoDouble(InpSymbol, SYMBOL_ASK) : SymbolInfoDouble(InpSymbol, SYMBOL_BID));
+  double sl = NormalizeDouble(dir > 0 ? g_sweepExt - buffer : g_sweepExt + buffer, _Digits);
+  double tp1 = g_armTP1;
+  double risk = MathAbs(entry - sl);
+  double reward = (dir > 0 ? tp1 - entry : entry - tp1);
+  if(reward < InpSwingMinRR * risk)
+  {
+    SwingDisarm(StringFormat("reward %.2f < %.2f x risk %.2f at confirmation", reward, InpSwingMinRR, risk));
+    return;
+  }
+  if(!SwingEntryFiltersPass())
+  {
+    SwingDisarm("filters at confirmation");
+    return;
+  }
+  ENUM_ORDER_TYPE ot = (dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+  double lots = SwingLots(entry, sl, ot);
+  if(lots <= 0.0)
+  {
+    SwingDisarm("not enough margin for the minimum lot");
+    return;
+  }
+  Trade.SetDeviationInPoints(InpSlippagePoints);
+  Trade.SetAsyncMode(false);
+  bool ok = (dir > 0)
+            ? Trade.Buy(lots, InpSymbol, 0.0, sl, 0.0, "SwingPullbackBuyConfirm")
+            : Trade.Sell(lots, InpSymbol, 0.0, sl, 0.0, "SwingPullbackSellConfirm");
+  if(!ok)
+  {
+    SwingDisarm(StringFormat("order failed rc=%d", (int)Trade.ResultRetcode()));
+    return;
+  }
+  PrintFormat("Swing confirm: entered %s %.2f lots @ %.2f level=%.2f swept to %.2f sl=%.2f tp1=%.2f (risk %.2f, reward %.2f)",
+              dir > 0 ? "BUY" : "SELL", lots, entry, g_armLevel, g_sweepExt, sl, tp1, risk, reward);
+  g_planSL = sl;
+  g_planTP1 = tp1;
+  tp1Hit = false;
+  tp2Hit = false;
+  lastTicket = 0;
+  SwingDisarm("");
+}
+
 // Called once per new H1 bar while flat. An existing pending order is kept unless the bias has flipped
 // (or turned neutral, with InpSwingCancelOnWait), price has moved more than InpSwingMaxDistATR x ATR away
 // from it, or the swing level for the same direction has changed. Then a new limit order is placed if the
@@ -836,6 +1048,11 @@ void PlanSwingEntry(int bias, bool filtersPass)
   }
   double entry = 0.0, sl = 0.0, tp1 = 0.0;
   bool havePlan = (bias != 0 && BuildSwingPlan(bias, atr[0], entry, sl, tp1));
+  if(InpSwingEntryStyle == SWING_CONFIRM_RECLAIM)
+  {
+    PlanSwingConfirm(bias, havePlan, entry, tp1, atr[0]);
+    return;
+  }
 
   ulong pending = FindPendingOrder();
   if(pending != 0 && OrderSelect(pending))
@@ -916,6 +1133,13 @@ void SwingHUDLines(string &l1, color &c1, string &l2, string &l3)
   c1 = (g_bias > 0 ? HUD_GREEN : (g_bias < 0 ? HUD_RED : HUD_SUBTEXT));
   l2 = "No pending order";
   l3 = " ";
+  if(g_armDir != 0)
+  {
+    l2 = StringFormat("ARMED %s @ %s (M5 reclaim)", g_armDir > 0 ? "BUY" : "SELL", DoubleToString(g_armLevel, _Digits));
+    l3 = (g_sweepExt > 0.0
+          ? StringFormat("Swept to %s   TP1 %s", DoubleToString(g_sweepExt, _Digits), DoubleToString(g_armTP1, _Digits))
+          : StringFormat("Waiting for a sweep   TP1 %s", DoubleToString(g_armTP1, _Digits)));
+  }
   ulong t = FindPendingOrder();
   if(t != 0 && OrderSelect(t))
   {
@@ -1439,9 +1663,25 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 // of request volume a live broker can throttle. Stairstep/BE moves are far larger than this.
 #define TRAIL_MIN_STEP_POINTS 500
 
+// v1.16: select this EA's own position (symbol + magic). It used PositionSelect(InpSymbol), which on a hedging
+// account picks the lowest-ticket position of the symbol -- a manual trade if one was open first. Tester proof
+// (review-scratch hedging harness, Jun 23-24 2026, a manual SELL opened first): every EA SELL got the manual
+// trade's TP copied onto it, the 500-point step guard compared against the manual SL so a modify was sent on
+// nearly every tick (~4,300 requests), and 13 requests were rejected as invalid stops. The manual position itself
+// was never changed (CTrade's symbol overloads do filter by magic).
 void MoveSLto(double slNew)
 {
-  if(!PositionSelect(InpSymbol)) return;
+  ulong ticket = 0;
+  for(int i = 0; i < PositionsTotal(); i++)
+  {
+    ulong tk = PositionGetTicket(i);
+    if(tk != 0 && PositionGetString(POSITION_SYMBOL) == InpSymbol && PositionGetInteger(POSITION_MAGIC) == InpMagic)
+    {
+      ticket = tk;
+      break;
+    }
+  }
+  if(ticket == 0 || !PositionSelectByTicket(ticket)) return;
   Trade.SetAsyncMode(false);
   int type = (int)PositionGetInteger(POSITION_TYPE);
   double currentSL = PositionGetDouble(POSITION_SL);
@@ -1452,7 +1692,7 @@ void MoveSLto(double slNew)
     return;
   double pt = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
   if(currentSL > 0.0 && MathAbs(clamped - currentSL) <= 0.5*pt) return; // no effective change
-  Trade.PositionModify(InpSymbol, clamped, currentTP);
+  Trade.PositionModify(ticket, clamped, currentTP);
 }
 
 double NormalizeLotsToSymbol(double desiredLots)
@@ -1512,6 +1752,8 @@ int OnInit()
               (int)InpRequireTrendFlip, (int)InpUseMidlineBreakout, InpBreakoutConfirmBars,
               InpATRMultiplier, InpSL_ATR_Mult, (int)InpUseRiskSizing, InpRiskPercent,
               (int)InpEnableMarginCheck, InpMaxSpreadPoints);
+  PrintFormat("Init: v1.16 EntryMode=%d BreakoutClosedBar=%d SwingEntryStyle=%d SweepMaxATR=%.2f",
+              (int)InpEntryMode, (int)InpBreakoutClosedBar, (int)InpSwingEntryStyle, InpSwingSweepMaxATR);
   return(INIT_SUCCEEDED);
 }
 
@@ -1605,6 +1847,40 @@ void OnTick()
     if(sellSignal && macd0 >= 0) sellSignal = false;
   }
 
+  // v1.16 optional closed-bar evaluation (InpBreakoutClosedBar). Replaces the signals above, which at the new-bar
+  // tick compare the first tick with the previous close (the forming bar's midline equals the previous close there).
+  if(InpBreakoutClosedBar)
+  {
+    buySignal = false;
+    sellSignal = false;
+    double cbMid = 0.0, cbUp = 0.0, cbDn = 0.0, cbC1 = 0.0, cbC2 = 0.0, cbC3 = 0.0;
+    int cbTr1 = 0, cbTr2 = 0;
+    if(newBar && ClosedBarRegime(cbMid, cbUp, cbDn, cbC1, cbC2, cbC3, cbTr1, cbTr2))
+    {
+      bool twoBars = (InpBreakoutConfirmBars > 1);
+      bool cbBuy, cbSell;
+      if(InpUseMidlineBreakout)
+      {
+        cbBuy  = (cbC2 <= cbMid && cbC1 > cbMid && (!twoBars || cbC3 <= cbMid));
+        cbSell = (cbC2 >= cbMid && cbC1 < cbMid && (!twoBars || cbC3 >= cbMid));
+      }
+      else
+      {
+        cbBuy  = (cbC2 <= cbDn && cbC1 > cbDn && (!twoBars || cbC3 <= cbDn));
+        cbSell = (cbC2 >= cbUp && cbC1 < cbUp && (!twoBars || cbC3 >= cbUp));
+      }
+      buySignal  = (InpRequireTrendFlip ? (cbTr1 == 1 && cbTr2 == -1 && cbBuy) : cbBuy);
+      sellSignal = (InpRequireTrendFlip ? (cbTr1 == -1 && cbTr2 == 1 && cbSell) : cbSell);
+      if(InpUseMACDFilter)
+      {
+        if(buySignal && macd1 <= 0) buySignal = false;
+        if(sellSignal && macd1 >= 0) sellSignal = false;
+      }
+      PrintFormat("CB state: close3=%.2f close2=%.2f close1=%.2f mid1=%.2f upPrev=%.2f dnPrev=%.2f trend2=%d -> trend1=%d breakBuy=%d breakSell=%d buySig=%d sellSig=%d",
+                  cbC3, cbC2, cbC1, cbMid, cbUp, cbDn, cbTr2, cbTr1, (int)cbBuy, (int)cbSell, (int)buySignal, (int)sellSignal);
+    }
+  }
+
   // log per new bar the regime state and raw signals
   if(newBar)
     PrintFormat("NB state: close1=%.2f close0=%.2f up1=%.2f dn1=%.2f mid=%.2f prevTrend=%d -> trend=%d breakBuy=%d breakSell=%d buySig=%d sellSig=%d (midBreak=%d)",
@@ -1685,6 +1961,12 @@ void OnTick()
   {
     buySignal = false;
     sellSignal = false;
+    // Confirm style: process the just-closed M5 bar before the hourly re-plan that may run on the same tick.
+    if(InpSwingEntryStyle == SWING_CONFIRM_RECLAIM && posDir == 0)
+    {
+      SwingConfirmCheck();
+      posDir = CurrentPositionDirection(curEntry, curSL);
+    }
     datetime h1Bar = iTime(InpSymbol, PERIOD_H1, 0);
     if(h1Bar != 0 && h1Bar != g_lastBiasBar)
     {

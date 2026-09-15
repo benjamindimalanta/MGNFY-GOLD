@@ -83,16 +83,17 @@ doesn't show is not a finding.
    compiled out by `#ifdef OBJPROP_BGCOLOR`; HUD rebuilt every tick). Not trading logic, listed so they
    aren't rediscovered.
 
-## 4. Unverified risks to check next
+7. **Hedging account: manual trade corrupted the EA's stop management (v1.15, fixed in v1.16).**
+   `MoveSLto()` read type/SL/TP via `PositionSelect(InpSymbol)` (lowest ticket of the symbol). Harness
+   run with a manual SELL opened first (Jun 23-24): manual position never modified or closed (`CTrade`'s
+   symbol overloads filter by magic), but all 22 EA SELLs got the manual TP, ~4,300 modifies were sent,
+   13 rejected. v1.16 selects by magic and modifies by ticket; 0 such effects in the same harness.
+8. **Stop-modify spam while the market is closed:** 7,811 failed "Market closed" requests in one 2-day
+   run. No P/L effect in the tester; not fixed yet.
 
-- `MoveSLto()` selects with `PositionSelect(InpSymbol)` and the TP3 exit calls
-  `Trade.PositionClose(InpSymbol)`; the account runs in **hedging mode**. If the user trades gold
-  manually on the same account, the EA may move the stop of, or close, the manual position. Verify with a
-  tester run that opens a second position with a different magic, or by code inspection plus a demo test.
-- `ClampSLForOrder()` returns 0 when the proposed stop is on the wrong side or too close, and the order is
-  then sent **without a stop loss**. Count how often this happens in logs (`Enter BUY ... sl=0.00`).
-- Small-account partial capture (`InpSmallCapThreshold`, the user's tests use 100) closes half the
-  position at a small dollar profit when equity is at or below the threshold; check whether it fires in
-  $100 runs and how it interacts with the TP ladder.
-- `IsNewBar()` on `InpTF` while the tester chart is H1 or M5: confirm entries happen at the intended
-  timeframe's bar opens only.
+## 4. Risks checked in the 2026-09-15 review
+
+- Orders without a stop (`ClampSLForOrder()` returns 0): 0 of 6,570 logged entries, 0 of 2,068 trades.
+- Small-account capture: never fires at 0.01 lot (0 in every $100 run; 50% of 0.01 rounds to 0).
+- `IsNewBar()` on `InpTF` with an H1 chart: 99.9% of breakout entries in the first 60 s of an M15 bar.
+- `InpOnlyOnePosition=false` disables breakout entries (entry block requires it); latent only.

@@ -207,10 +207,20 @@ Neither mode is profitable. Breakout's entry is close to random (see `ea-code-au
 | Keep swing orders across hourly checks | Fill rate 12% -> 38.5%, but extra fills mostly lost | JOURNAL v1.15 |
 | Breakout vs swing (12 weeks) | Both lose (table above) | JOURNAL v1.15 |
 | Session / weekday patterns (232 trades) | Worst: London+NY overlap and Asia; too few trades to act | JOURNAL 4-week diagnosis |
+| v1.16 defaults = v1.15? | Yes, trades identical on Jun 22 + Jul 6, both modes | JOURNAL review round 1 |
+| Manual trade on a hedging account (v1.15) | Manual position untouched; EA copied its TP and spammed modifies; fixed in v1.16 | JOURNAL review round 1, harness in review report |
+| E1 swing confirmation entry (sweep + M5 reclaim), 12 wk IS | 56 trades, PF 1.01, +$2.30; fast stop-outs 55% -> 11%; not promoted | JOURNAL review round 1 |
+| E2 closed-bar regime flip (breakout), 12 wk IS | 124 trades, PF 1.01, +$6.88, DD 12.3%; not promoted | JOURNAL review round 1 |
+| E3 flip only with M30/H1/H4 bias (screen of E2 trades) | agree 23 trades PF 1.05; not run | JOURNAL review round 1 |
 
-Ideas raised but **not yet tested**: confirmation entry for swing mode (M5 rejection close after a
-sweep of the swing), closed-bar breakout signal, structure-based trailing, session filter to London/NY,
-news blackout from an imported schedule, risk-based sizing comparison.
+v1.16 (2026-09-15) added `InpBreakoutClosedBar`, `InpSwingEntryStyle`, `InpSwingSweepMaxATR` (all default
+off) and the hedging `MoveSLto()` fix. Validation (Mar 2 - May 22) and holdout (Jan 5 - Feb 27) weeks are
+still unused for strategy decisions. About 8 ideas have been tried on the Jun 22 - Sep 11 weeks.
+
+Ideas raised but **not yet tested**: exit management in MT5 (stairstep lock to TP1 price and trail 1.5 were
+chosen with the rejected Python simulator), structure-based trailing, session filter to London/NY (E1's
+session split showed nothing), news blackout from an imported schedule, risk-based sizing comparison,
+throttling stop modifications while the market is closed (7,811 rejected requests in one 2-day run).
 
 ## 9. History
 
