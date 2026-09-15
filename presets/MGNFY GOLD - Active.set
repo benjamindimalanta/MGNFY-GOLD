@@ -1,7 +1,7 @@
 ; MGNFY GOLD EA - ACTIVE Settings
 ; Higher risk, more trades, wider stops
 
-InpSymbol=XAUUSD
+InpSymbol=XAUUSDm
 InpTF=0|0|PERIOD_CURRENT
 InpLots=0.01
 InpATRPeriod=14

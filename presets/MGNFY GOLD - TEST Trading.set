@@ -2,7 +2,7 @@
 ; Disables ALL filters to ensure trades are generated
 ; Use this to verify the EA can trade, then add filters back
 
-InpSymbol=XAUUSD
+InpSymbol=XAUUSDm
 InpTF=0|0|PERIOD_CURRENT
 InpLots=0.01
 InpATRPeriod=14

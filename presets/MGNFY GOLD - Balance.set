@@ -1,7 +1,7 @@
 ; MGNFY GOLD EA - BALANCED Settings
 ; Moderate risk, balanced approach
 
-InpSymbol=XAUUSD
+InpSymbol=XAUUSDm
 InpTF=0|0|PERIOD_CURRENT
 InpLots=0.01
 InpATRPeriod=14
@@ -40,7 +40,7 @@ InpUseSessionFilter=false
 InpSessionStartHour=12
 InpSessionEndHour=22
 InpUseATRTrailing=true
-InpTrail_ATR_Mult=1.0
+InpTrail_ATR_Mult=1.5
 InpVisualKeepBars=1
 InpStatsAccountWide=false
 InpStatsTodayOnly=true

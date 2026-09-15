@@ -1,7 +1,7 @@
 ; MGNFY GOLD EA - BALANCED Settings (FIXED for Trading)
 ; Moderate risk, balanced approach - TREND FILTER DISABLED for testing
 
-InpSymbol=XAUUSD
+InpSymbol=XAUUSDm
 InpTF=0|0|PERIOD_CURRENT
 InpLots=0.01
 InpATRPeriod=14

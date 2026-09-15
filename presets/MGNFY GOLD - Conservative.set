@@ -1,7 +1,7 @@
 ; MGNFY GOLD EA - CONSERVATIVE Settings
 ; Lower risk, tighter stops, trend-only trading
 
-InpSymbol=XAUUSD
+InpSymbol=XAUUSDm
 InpTF=0|0|PERIOD_CURRENT
 InpLots=0.01
 InpATRPeriod=14
