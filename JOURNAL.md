@@ -303,3 +303,84 @@ stable -- individual per-run cells range from 4 to 91 trades.
 `N_WEEKS` substantially (the full 12-week candidate pool is available now;
 more will open up as time passes) before drawing final conclusions on the
 direction-bias and loss-streak findings specifically.
+
+
+---
+
+## 2026-09-15 -- v1.13 build, user's exact settings, 4 weeks (Sep 7 + 3 random Aug/Sep weeks)
+
+**Build:** v1.13 (TP-ladder fix, stairstep lock, trailing min step 500 pts,
+HUD rewrite). **Settings:** the user's own tester inputs, copied from the
+visual-verification run: XAUUSDm, tester chart H1, signal timeframe
+`InpTF=M15`, trend filter ON with `InpTrendTF=16385` -- that is PERIOD_H1,
+i.e. an **H1 EMA-200** filter (first misreported in chat as H4), midline
+breakout, fixed 0.01 lot, SL 1.0xATR, TP 1R/2R/3R, trail 1.5xATR, margin
+check 1.2x. $100 deposit, 1:100, real ticks (`Model=4`).
+
+**Weeks:** Sep 7-10 (Mon-Thu, the visual verification run) plus Aug 10-14,
+Aug 17-21, Aug 31-Sep 4, drawn with `random.SystemRandom` from the five
+remaining full Aug/Sep weeks and printed before any test ran
+(`mt5_week_check.py`). Each week starts from a fresh $100. Every trade:
+`mt5_weekcheck_v113_trades.csv`.
+
+| Week | Trades | Wins | Losses | Win% | Net $ | PF | End $ | MaxDD% | Avg win $ | Avg loss $ | Worst loss run | Trades/day | SL exits | TP3 exits | Buys/Sells |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Sep 7-10 | 57 | 16 | 41 | 28.1 | -50.93 | 0.80 | 49.07 | 62.5 | 12.79 | -6.23 | 8 | 14.3 | 50 | 7 | 0/57 |
+| Aug 10-14 | 62 | 22 | 40 | 35.5 | -52.52 | 0.84 | 46.42 | 75.5 | 12.79 | -8.35 | 7 | 15.5 | 50 | 12 | 62/0 |
+| Aug 17-21 | 28 | 8 | 20 | 28.6 | -53.70 | 0.54 | 45.77 | 64.3 | 7.76 | -5.79 | 9 | 14.0 | 26 | 2 | 27/1 |
+| Aug 31-Sep 4 | 85 | 32 | 53 | 37.6 | -43.60 | 0.89 | 55.87 | 72.0 | 10.49 | -7.16 | 6 | 17.0 | 75 | 9 | 17/68 |
+| **Pooled** | **232** | **78** | **154** | **33.6** | **-200.75** | **0.81** | -- | -- | **11.33** | **-7.04** | -- | **15.5** | **201** | **30** | **106/126** |
+
+("SL exits" includes trailing-stop exits. Pooled End $ / MaxDD / loss run
+are omitted because the weeks are separate $100 accounts.)
+
+### Findings
+
+1. **Losing in every week tested (4 of 4).** Win rate 28-38%, PF 0.54-0.89.
+2. **The near-identical ~-$50 per week is a margin floor, not a coincidence.**
+   A 0.01-lot gold position at ~$4,300-4,450 uses ~$44 margin; with the
+   1.2x buffer the EA needs ~$53 free margin to open a trade. Once a $100
+   account loses ~$47 it cannot open anything again. From the trade
+   timeline: Aug 17-21 dropped below ~$53 on Tue Aug 18 22:04 after 27
+   trades and made 1 more trade in the remaining ~74h; Aug 10-14 stopped
+   trading Thu Aug 13 18:25 with ~30h left; Sep 7-10 stopped Thu 02:39 with
+   ~21h left. Only Aug 31-Sep 4 stayed above the floor and traded to the
+   end (and still lost $43.60). So on $100 the weekly loss is capped by
+   margin -- the floor limits the damage; it does not hide a recovery.
+3. **Below breakeven on the math.** Avg win $11.33 vs avg loss $7.04 means
+   breakeven needs ~38.3% wins; actual pooled 33.6%.
+4. **Losers are fast, full stop-outs -- the entry signal fires on noise.**
+   101 of 154 losers hit roughly the full -1R stop (<= -0.9R); 45 were
+   cushioned by the trail; 8 near breakeven. Median loser lasts 23 min;
+   61% are stopped within 30 min, 78% within 60 min. Winners hold a
+   median 87 min; 41 of 78 reached >= 1R. At ~15 trades/day, the M15
+   midline-breakout trigger is overtrading.
+5. **Quick re-entry after a loss is common but not the main problem.** 58%
+   of post-loss entries came within 15 min; their win rate (32%) is not
+   worse than later re-entries (29%).
+6. **Time of day (server time), small samples -- a lead, not a conclusion:**
+
+   | Entry block | Trades | Win% | Net $ |
+   |---|---|---|---|
+   | 00-04h | 65 | 29.2 | -126.1 |
+   | 04-08h | 37 | 40.5 | +78.4 |
+   | 08-12h | 37 | 21.6 | -73.2 |
+   | 12-16h | 54 | 27.8 | -153.1 |
+   | 16-20h | 20 | 45.0 | +21.4 |
+   | 20-24h | 19 | 63.2 | +51.8 |
+
+7. **No directional flaw.** BUY 106 trades 34.0% win (-$117.4); SELL 126
+   trades 33.3% (-$83.3). The H1 trend filter only picks the side --
+   Aug 10-14 was all buys, Sep 7-10 all sells.
+
+### Next tests (not yet run)
+
+- **Entry quality first** (targets finding 4): `InpUseMidlineBreakout=false`
+  (band breakout), and/or `InpBreakoutConfirmBars=2`, and/or
+  `InpRequireTrendFlip=true`. Success = fewer trades/day and fewer <=30-min
+  stop-outs without losing the winners.
+- **Remove the margin floor from the measurement** (finding 2): rerun the
+  same weeks with a $500 deposit (the product page's recommended size) so
+  weekly results show the strategy's real P&L instead of stopping at ~-$50.
+- **Session filter** (finding 6) only after more weeks -- 19-65 trades per
+  block is too thin to pick hours without overfitting.
