@@ -2,6 +2,40 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.18] - 2026-09-16
+Market context, review round 3 (`reviews/2026-09-16-pro-trader-review-round3.md`).
+
+- **`InpTrailATRTF` now defaults to M30.** The round-2 candidate was run once on the untouched
+  validation weeks (Mar 2 - May 22, $5,000, 1% risk) against the old default and met all three
+  pre-registered criteria: paired +0.190R per trade (needed > 0 and >= half the in-sample +0.179R),
+  total +29.74R vs +17.80R, +$1,362.66 vs +$861.88. Caveat kept on the record: 26 of 57 paired
+  trades were worse and only 10 better, t = 1.26, better in 6 of 12 weeks -- the gain comes from a
+  few large winners.
+- **New market-context features, all off by default and measured from history at runtime** (no
+  hardcoded tables):
+  - `InpUseContext` / `InpContextDays`: median M5 range, tick volume and spread for every weekday
+    and hour, rebuilt daily from the last 30 days.
+  - `InpUseRegimeFilter` with `InpRegimeMinRatio` / `InpRegimeMaxRatio` / `InpRegimeRiskFactor`:
+    today's ATR(D1) against its own 20-day median; outside the band the EA either skips the trade
+    or trades it at a fraction of normal risk.
+  - `InpUseShockPause` with `InpShockRangeMult` / `InpShockVolMult` / `InpShockSpreadMult` /
+    `InpShockCooldownMin`: an M5 bar far outside what that hour normally does (or a spread spike)
+    pauses new entries. This is the backtestable answer to the news question, since the Strategy
+    Tester has no economic calendar.
+  - `InpSkipWeekdays`: no new entries on the listed weekdays (server time).
+- Verified in the tester with forced settings (Jun 22 week): the shock pause at 3x took 4 of the 5
+  trades instead of 5; a regime band of 1.00-1.05 skipped every setup (no trades at all); a regime
+  risk factor of 0.5 halved the lots (0.01-0.03 against 0.02-0.06, risk $17-24 against $34-48).
+  With defaults unchanged, v1.18 reproduces the round-2 trades exactly on the checked weeks.
+- **Nothing else became a default.** On the 12 in-sample weeks the two filters the diagnosis
+  supported both missed their pre-registered bars: no Friday entries 46 trades +22.00R (needed
+  avg >= +0.482R, got +0.478R) and no 00:00-06:00 UTC entries 41 trades +21.43R (needed total
+  >= +21.92R), against a baseline of 57 trades and +18.92R. In both cases every surviving trade is
+  identical to the baseline, so the gain is only the removal of trades that were negative in those
+  same weeks.
+- Tooling: `mt5_mode_compare.py` writes string inputs plainly when an override is marked
+  `Name=str:value` (the optimization suffix was reaching the EA as part of the string).
+
 ## [1.17] - 2026-09-15
 User-approved defaults and exit/session experiments, review round 2
 (`reviews/2026-09-15-pro-trader-review-round2.md`). The new defaults are risk controls, not a

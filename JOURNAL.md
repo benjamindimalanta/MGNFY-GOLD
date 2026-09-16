@@ -966,3 +966,196 @@ for. Trading around the clock stays the default; the windows stay behind `InpUse
 - Ideas tried on the IS weeks: 12 (X1a, X1b, X1c, X2 added).
 - Trades: `mt5_review_round2_12wk_trades.csv` (modes `B2`, `X1a_breakeven`, `X1b_structure`,
   `X1c_atr_m30`, `X2_windows`).
+
+
+---
+
+## 2026-09-16 -- Review round 3
+
+Report: `reviews/2026-09-16-pro-trader-review-round3.md`.
+
+**User's answers:** live account is **$100 and stays on demo** until it can carry 1% risk (so the
+small-account behaviour has to be explained, not patched around); **yes to the validation run of the
+M30 ATR trail**; round-3 focus is **market context** -- the robot should know whether the week is
+moving normally, and should skip or shrink trades when the market is abnormal (including the
+market's own reaction to FOMC/NFP/CPI, detected from price, not a date list). Earlier answers stand:
+1% risk, rolling 10% equity guard (still our interpretation, unconfirmed), around the clock,
+confirmation entry.
+
+### Experiment X1c-V -- validation of the M30 ATR trail (pre-registered 2026-09-16, before the run)
+- **What:** the round-2 candidate `InpTrailATRTF=30` (trail 1.5 x ATR(M30) instead of ATR(M15)),
+  against B2 (v1.17 defaults) on the **validation weeks Mar 2 - May 22, 2026** (12 full weeks),
+  same settings as round 2: real ticks, $5,000 at the start of each week, 1% risk, confirmation
+  entry, `EXTRA_INPUTS="InpUseRiskSizing=true;InpSwingEntryStyle=1"` plus the trail override.
+  Both runs are new: B2 has never been run on these weeks either.
+- **Criteria, exactly as pre-registered in round 2** (not re-invented now): paired mean dR > 0 **and
+  at least half the in-sample value** (IS was +0.179R per trade, so **>= +0.090R**), **and** total R
+  >= B2's total R on the same weeks.
+- **If it passes:** `InpTrailATRTF=30` becomes the default exit trail, and the holdout
+  (Jan 5 - Feb 27) is the only untouched data left for a final candidate.
+- **If it fails:** the default exit stays as it is (ATR on the working timeframe), the variant stays
+  behind the input, and Mar - May counts as used from now on.
+- **Falsified by:** paired mean dR <= 0, or below +0.090R, or total R below B2's.
+- Sample note: ~56 trades per run on 12 weeks. This is a confirmatory test of one pre-registered
+  candidate, not a search; it still cannot establish an edge on its own.
+
+### X1c-V result -- PASSED its pre-registered criteria; M30 trail becomes the default
+Runs `r3valB2` and `r3valX1c`: 12 runs each, the intended inputs in every tester log
+(`InpTrailATRTF=30` in all 12 candidate runs), a ticks line for all 12 weeks, and the first
+validation week (Mar 2) traded (B2: 4 trades, 2,106,089 ticks).
+
+| Validation, Mar 2 - May 22 | Trades | Win% | Total R | Avg R | PF (R) | Net $ | PF ($) | Weeks R >= base | Paired dR (t) | Worst week DD |
+|---|---|---|---|---|---|---|---|---|---|---|
+| B2, trail 1.5 x ATR(M15) | 59 | 44.1 | +17.80 | +0.302 | 1.68 | +861.88 | 1.73 | -- | -- | 3.0% |
+| X1c, trail 1.5 x ATR(M30) | 57 | 38.6 | +29.74 | +0.522 | 2.02 | +1,362.66 | 2.01 | 6/12 | +0.190 (t +1.26) | 3.4% |
+
+Criteria as written in round 2: paired dR > 0 (**+0.190R**), at least half the in-sample +0.179R
+(**>= +0.090R**), total R >= B2's (**+29.74 vs +17.80**). All three met, so **`InpTrailATRTF`
+defaults to M30 in v1.18**, applying the rule as pre-registered rather than re-judging it now.
+
+Caveats stated plainly: 26 of the 57 paired trades were *worse* and only 10 better -- the gain comes
+from a handful of large winners; t = 1.26 is not statistically significant; it beat B2 in only 6 of
+12 weeks. Both tested periods may simply have suited a looser trail. Mar - May is now used data;
+Jan 5 - Feb 27 remains the only untouched set.
+
+### Round 3 diagnosis -- what "normal" looks like (existing data only, no new runs)
+Bars pulled from the terminal (`review-scratch/fetch_bars.py`), analysis in
+`review-scratch/context_diag.py` / `context_diag.txt`.
+
+- **Normal movement (Dec 2025 - Sep 2026):** D1 median true range **71.66** (10th-90th percentile
+  26.2-156.9), ATR(D1) median 83.0. Median M5 range by hour (UTC) peaks at 13:00-15:00
+  (7.5-7.9) and 01:00 (6.8); the quiet hours are 20:00-21:00 (3.2) and 03:00-04:00 (3.3-4.0).
+  Median M5 tick volume peaks 13:00-14:00 (~2,100) against ~420-820 overnight. Weekday medians are
+  flat (M5 range 4.65-4.97). Spread sits at 260 points almost always.
+- **Volatility states per period** (ATR(D1) known at the open vs its own 20-day median):
+
+  | Period | Days | Ratio min / med / max | Compressed <0.8 | Normal | Expanded >1.25 |
+  |---|---|---|---|---|---|
+  | In-sample Jun 22 - Sep 11 | 71 | 0.82 / 0.99 / 1.18 | **0** | **71** | **0** |
+  | Validation Mar 2 - May 22 | 70 | 0.60 / 0.98 / 1.36 | 18 | 44 | 8 |
+  | Holdout Jan 5 - Feb 27 | 47 | 0.44 / 1.12 / 3.32 | 10 | 18 | 19 |
+  | All 403 days | 403 | 0.44 / 1.00 / 3.32 | 52 | 255 | 63 |
+
+  **The 12 in-sample weeks contain no abnormal days at all.** A daily regime filter is therefore
+  *untestable in-sample*: it would never fire once in 12 weeks. That is a fact about the tuning
+  period, not evidence that regime filtering is useless -- and it explains why every previous round
+  found "the market" undifferentiated.
+- **M30 ATR state at entry: no consistent sign.** Compressed entries are +23.2R over 110 trades in
+  the v1.11 set but -18.9R over 52 trades in the v1.13 set; expanded is +4.8R/139 (v1.15 breakout)
+  against -3.2R/15 (E2). Nothing to act on.
+- **Hour of day:** the Asia block 00:00-06:00 is negative in 5 of 6 datasets (v1.15 breakout
+  -15.5R/299 trades, v1.13 -13.2R/84, v1.11 -17.0R/162, v1.15 swing -12.6R/28, B2 -1.3R/18;
+  E2 +5.4R/34 is the exception). The best block differs per dataset, so only the negative side
+  repeats.
+- **Weekday:** Friday is negative in **all six** datasets (-9.5R/166, -14.0R/14, -6.3R/11,
+  -6.4R/11, -10.5R/25, -3.4R/16). **Caveat: these datasets overlap heavily in time and are
+  different builds over mostly the same weeks -- six datasets, not six independent samples.**
+- **Shocks:** an M5 bar with range >= 4x its own hour's median happens ~8 times a day (2.8% of
+  bars), >= 6x about 2.9 times a day; after a 6x bar the next 30 minutes average 5.9x the usual
+  range, so shocks really do cluster. But only **2 of B2's 56** in-sample trades were entered
+  within 30 minutes of a >= 4x shock (3 within 60 minutes), so a shock pause **cannot be judged
+  in-sample either**. Spread spikes are rare: >= 2x its hour median on 0.27% of M5 bars, >= 3x on
+  7 of 56,013 bars.
+
+### Experiments, pre-registered 2026-09-16 (before any run)
+**Baseline B3 = v1.18 defaults** = round-2 B2 plus the now-default M30 trail, i.e. the existing IS
+run `r2X1c`: 57 trades, +18.92R, +$901.36, PF 1.60, worst week 4.1%, 6 of 12 weeks positive. A
+default-behavior check must first reproduce that run with v1.18 defaults.
+Ideas tried on these 12 weeks: 12 before this round, 14 after.
+
+- **X3 -- no new entries on Friday** (`InpSkipWeekdays="5"`, default ""): the only pattern that
+  repeats across every dataset, and the user's own rule ("careful on Monday, Friday and news days").
+- **X4 -- no new entries 00:00-06:00 UTC** (`InpUseSessionFilter=true`, `InpSessionStartHour=6`,
+  `InpSessionEndHour=24`; existing integer inputs, so no string-override risk): the Asia block is the
+  most consistently negative hour range.
+- **Pass criteria for both** (IS 12 weeks, raised bar): total R >= baseline + 3.0R; avg R >=
+  baseline + 0.15R; weekly R >= baseline in >= 7 of 12 weeks; worst weekly DD <= 1.25 x baseline;
+  and the baseline trades the filter removes must have mean R < 0.
+- **A pass does not flip a default this round.** With ~57 trades and a filter chosen from these same
+  weeks, a pass only makes it a **holdout candidate for a later round**; Jan 5 - Feb 27 stays
+  untouched in round 3.
+- **Falsified if** total R <= baseline.
+- **Not run as experiments** (untestable in-sample, functional checks only): the daily regime filter
+  (no abnormal days) and the shock pause (2-3 affected trades). Both are built, default off, and
+  verified to fire in forced settings.
+
+### Round 3 checks and results
+
+**Default behaviour:** v1.18 with default inputs reproduced the stored `r2X1c` trades exactly on
+Jun 22 (5 trades, -$130.06) and Aug 24 (6 trades, +$560.37), so B3 = `r2X1c` is a valid baseline.
+
+**Two tool/EA defects found and fixed before judging anything:**
+1. `mt5_mode_compare.py` wrote string overrides as `InpSkipWeekdays=5||5||0||5||N`, and the EA
+   received that whole text as the string (it would also have matched the "0" = Sunday). Fixed with
+   an explicit `Name=str:value` form; verified in the log (`InpSkipWeekdays=5`) and in trades (Jun 22
+   week 5 trades -> 4, the Friday entry gone).
+2. The new breakout context gate ran on every tick in swing mode, because the raw breakout signals
+   are still computed there: **1,591,589 log lines in one week**. Trades were unaffected (the swing
+   path re-evaluates the gate), but the logs were unusable. Fixed: the gate is asked only on a new
+   bar in breakout mode, and the risk-scaling line is limited to one an hour. Re-run: 5 log lines,
+   identical trades, lots and R.
+
+**Functional checks (Jun 22 week, forced settings so the mechanisms must fire):**
+
+| Check | Setting | Result |
+|---|---|---|
+| Shock pause | `InpUseShockPause=true`, 3x range/ticks, 60 min | 4 of the 5 trades taken (the Monday 00:30 entry was inside a cooldown), R -2.00 vs -3.00 |
+| Regime skip | band forced to 1.00-1.05 | **no trades at all** -- every setup skipped, as intended |
+| Regime risk shrink | same band, `InpRegimeRiskFactor=0.5` | same 5 trades at half size (lots 0.01-0.03 vs 0.02-0.06; risk $17-24 vs $34-48; R identical -3.00, $ -58.48 vs -130.06) |
+
+**X3 -- no Friday entries: FAILED (narrowly), default unchanged**
+
+| IS 12 weeks | Trades | Win% | Total R | Avg R | PF (R) | Net $ | Weeks R >= B3 | Worst week DD |
+|---|---|---|---|---|---|---|---|---|
+| B3 (v1.18 defaults) | 57 | 38.6 | +18.92 | +0.332 | 1.60 | +901.36 | -- | 4.1% |
+| X3 (`InpSkipWeekdays="5"`) | 46 | 39.1 | +22.00 | +0.478 | 1.87 | +1,056.60 | 11/12 | 3.1% |
+
+Criteria: total R >= 21.92 ✓ (22.00), **avg R >= 0.482 ✗ (0.478)**, weeks >= 7 ✓ (11), DD <= 5.1% ✓,
+removed trades mean R < 0 ✓ (-0.279 over 11 trades). One of five criteria missed, by 0.004R -- a miss
+is a miss. And the result is circular anyway: all 46 surviving trades are *bit-identical* to the
+baseline (paired dR = 0.000), so the "gain" is exactly the 11 Friday trades that were negative in
+these same weeks.
+
+**X4 -- no entries 00:00-06:00 UTC: FAILED, default unchanged**
+
+| IS 12 weeks | Trades | Win% | Total R | Avg R | PF (R) | Net $ | Weeks R >= B3 | Worst week DD |
+|---|---|---|---|---|---|---|---|---|
+| X4 (session filter 06-24) | 41 | 41.5 | +21.43 | +0.523 | 2.00 | +1,004.62 | 9/12 | 2.6% |
+
+Criteria: **total R >= 21.92 ✗ (21.43)**, avg R >= 0.482 ✓ (0.523), weeks >= 7 ✓ (9), DD ✓, removed
+trades mean R < 0 ✓ (-0.197 over 18 trades). Of the 39 shared trades 38 are identical and one is
+worse; the filter also let 2 new setups through. Same circularity as X3.
+
+**Round 3 conclusion**
+- Promoted: only the M30 ATR trail (on its pre-registered validation pass). X3 and X4 stay off.
+- The context features (profile, regime, shock pause, weekday skip) ship **off**, verified to work,
+  explicitly **not** shown to make money -- the in-sample weeks cannot test them.
+- Ideas tried on the IS weeks: 14. The IS weeks are exhausted for tuning, and they are also the
+  wrong data for context work: they contain no abnormal day at all.
+- Jan 5 - Feb 27 remains untouched. It is the most abnormal stretch of the year (19 of 47 days
+  expanded, ratio up to 3.32), which makes it the natural place to judge a context-aware candidate
+  once one exists -- not another filter fitted to the summer.
+- Trades: `mt5_review_round3_trades.csv` (modes `val_B2_trail_m15`, `val_X1c_trail_m30`,
+  `IS_B3_default_m30`, `IS_X3_no_friday`, `IS_X4_no_asia`).
+
+### The $100 account: what balance the demo needs, and why there is no honest "small-account preset"
+B3's 57 in-sample trades have stops of 3.44 to 17.23 price units, i.e. **$3.44-$17.23 of risk at the
+0.01 minimum lot** (median $7.10). Against the 1% target and the 1.5% hard cap:
+
+| Demo balance | Trades skipped by the cap | Trades taken | Mean risk of taken trades | Forced to the 0.01 minimum |
+|---|---|---|---|---|
+| $100 | **57 of 57** | **0** | -- | 57 |
+| $500 | 26 | 31 | 1.08% | 43 |
+| $1,000 | 5 | 52 | 0.84% | 13 |
+| $2,000 | 0 | 57 | 0.83% | 0 |
+| $5,000 (tested) | 0 | 57 | 0.93% | 0 |
+
+So on the user's $100 the robot correctly **never trades**, and on $500 it would show roughly half of
+its setups -- a robot that looks broken while it is in fact obeying the risk rule.
+
+**Would a "small-account preset" be honest? No.** If the cap were lifted so a $100 account always
+used 0.01 lot, the real risk per trade would be **3.4% to 17.2% of equity** (median 7.1%), with 43 of
+57 trades risking more than 5%. Two to eleven losing trades would halve the account. That is not a
+preset, it is 1% risk in name only, so the cap stays and the answer is the balance, not the input:
+**fund the demo with $2,000 to see the tested behaviour** (or $1,000 and accept ~9% of setups
+skipped). This is also the honest precondition for going live later.

@@ -71,6 +71,23 @@ In winter every London and NY time shifts one hour later in UTC.
 Typical XAUUSD daily range in 2026 prices is roughly $30-60; an M30 ATR of $8-14 is common. A single
 M5 candle during news can exceed a normal hour's range.
 
+**Measured on XAUUSDm, Dec 2025 - Sep 2026** (56,013 M5 bars; `review-scratch/context_diag.py` in round 3):
+
+| What | Value |
+|---|---|
+| D1 true range | median **71.66**, 10th-90th percentile 26.2-156.9; ATR(14) median 83.0 |
+| Busiest hours (median M5 range) | 13:00-15:00 UTC **7.5-7.9**, then 01:00 (6.8), 15:00 (6.7), 12:00 (5.6) |
+| Quietest hours | 20:00-21:00 **3.2**, 03:00-04:00 3.3-4.0, 19:00 4.0 |
+| Tick volume | peaks 13:00-14:00 (~2,050-2,135 per M5) against ~420-820 overnight |
+| Weekday | almost flat: median M5 range 4.65 (Mon) to 4.97 (Thu) |
+| Spread | 260 points nearly always; >= 2x its hour's median on only 0.27% of M5 bars |
+| Daily volatility state (ATR(D1) vs its own 20-day median) | 13% of days compressed (<0.8), 63% normal, 16% expanded (>1.25); extremes 0.44 and 3.32 |
+| Shocks | an M5 bar >= 4x its hour's median range happens ~8x a day (2.8% of bars), >= 6x ~2.9x a day; the 30 minutes after a 6x bar average 5.9x the usual range, so shocks cluster |
+
+Two practical consequences: the dead hours are the late US afternoon and the pre-London small hours,
+not Asia as a whole (01:00 is one of the livelier hours of the day); and "abnormal" has to be judged
+against *that hour's* usual movement, not a fixed dollar amount.
+
 Weekdays: Monday often waits for London to set direction after the weekend; Tuesday-Thursday usually
 carry the cleanest trends; Friday afternoon (after ~16:00) sees position squaring and random reversals,
 worse before a US jobs report.

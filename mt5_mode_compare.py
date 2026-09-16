@@ -40,7 +40,13 @@ SCRATCH = os.path.dirname(os.path.abspath(__file__))
 
 
 def set_input(ini_text, name, value):
-    line = f"{name}={value}||{value}||0||{value}||N"
+    # String inputs must be written plain: the ||start||step||stop||N suffix is only for numeric optimization
+    # ranges, and the tester would otherwise hand the EA the whole "5||5||0||5||N" text as the string value.
+    # Mark them in EXTRA_INPUTS as Name=str:value.
+    if value.startswith("str:"):
+        line = f"{name}={value[4:]}"
+    else:
+        line = f"{name}={value}||{value}||0||{value}||N"
     new, n = re.subn(rf"^{re.escape(name)}=.*$", line, ini_text, flags=re.M)
     return new if n else ini_text.rstrip("\n") + "\n" + line + "\n"
 

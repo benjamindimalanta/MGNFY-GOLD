@@ -78,9 +78,19 @@
 //|  - Selectable exit rule at TP1/TP2, ATR-trail timeframe and       |
 //|    trade windows (server time), off by default.                  |
 //+------------------------------------------------------------------+
+//| v1.18 (2026-09-16): market context, review round 3               |
+//|  - The ATR trailing stop now uses M30 by default: the round-2     |
+//|    candidate passed its pre-registered validation run.            |
+//|  - New, all off by default and computed from history at runtime:  |
+//|    a median movement profile per weekday/hour (M5 range, ticks,   |
+//|    spread), a daily volatility-regime classifier (compressed /    |
+//|    normal / expanded) that can skip or shrink trades, a shock     |
+//|    detector that pauses new entries for a cooldown, and a         |
+//|    weekday skip list.                                             |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.17"
+#property version   "1.18"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -165,13 +175,27 @@ input double   InpSwingSweepMaxATR     = 1.0;             // Swing confirm entry
 
 // v1.17: exits, equity guard, trade windows, stop modifications while the market is closed
 input ENUM_TP1_EXIT InpExitAtTP1       = EXIT_STOP_TO_TP1; // What the stop does when TP1 / TP2 are reached (with InpMoveToBEafterTP1)
-input ENUM_TIMEFRAMES InpTrailATRTF    = PERIOD_CURRENT;  // ATR trailing timeframe (PERIOD_CURRENT = InpTF)
+input ENUM_TIMEFRAMES InpTrailATRTF    = PERIOD_M30;      // ATR trailing timeframe (v1.18 default M30: passed validation; PERIOD_CURRENT = InpTF)
 input bool     InpUseEquityGuard       = true;            // Pause new entries while equity is InpEquityGuardPct or more below its rolling peak
 input double   InpEquityGuardPct       = 10.0;            // Equity guard: drawdown from the rolling peak that pauses new entries (%)
 input int      InpEquityGuardDays      = 7;               // Equity guard: rolling window for the peak (days)
 input bool     InpUseTradeWindows      = false;           // Only enter inside InpTradeWindows (server time); pending orders cancelled outside them
 input string   InpTradeWindows         = "06:00-10:00,11:00-13:00,15:00-17:00"; // Server time (UTC on Exness) = 10-14, 15-17, 19-21 at UTC+4
 input bool     InpThrottleClosedMarket = true;            // Don't send stop modifications while the symbol's trade session is closed
+
+// v1.18: market context. All off by default; every number is measured from recent history at runtime.
+input bool     InpUseContext           = false;           // Build the movement profile (median M5 range/ticks/spread per weekday and hour)
+input int      InpContextDays          = 30;              // Days of M5 history used for the profile
+input bool     InpUseRegimeFilter      = false;           // React when the day's ATR(D1) is far from its 20-day median
+input double   InpRegimeMinRatio       = 0.80;            // Below this the day is "compressed"
+input double   InpRegimeMaxRatio       = 1.30;            // Above this the day is "expanded"
+input double   InpRegimeRiskFactor     = 0.0;             // 0 = skip those days; e.g. 0.5 = trade them at half risk
+input bool     InpUseShockPause        = false;           // Pause new entries after an abnormal M5 bar for this hour
+input double   InpShockRangeMult       = 6.0;             // Shock: M5 range >= this x the hour's median range
+input double   InpShockVolMult         = 6.0;             // Shock: M5 tick volume >= this x the hour's median
+input double   InpShockSpreadMult      = 2.0;             // Shock: current spread >= this x the hour's median spread
+input int      InpShockCooldownMin     = 30;              // Minutes without new entries after a shock
+input string   InpSkipWeekdays         = "";              // No new entries on these weekdays, server time (0=Sun ... 5=Fri, e.g. "5")
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
@@ -238,6 +262,17 @@ int      g_winStart[];                // trade windows, minutes of the day (serv
 int      g_winEnd[];
 datetime g_modifyPausedUntil = 0;     // no stop modifications before this time (after a "market closed" rejection)
 datetime g_lastStructBar = 0;         // structure trail: last M15 bar processed
+// v1.18 market-context state
+double   g_profRange[7][24];          // median M5 range per weekday/hour
+double   g_profVol[7][24];            // median M5 tick volume
+double   g_profSpread[7][24];         // median M5 spread (points)
+bool     g_profReady = false;
+datetime g_profBuilt = 0;
+datetime g_shockUntil = 0;            // no new entries before this time
+datetime g_lastShockBar = 0;
+double   g_regimeRatio = 0.0;         // ATR(D1) vs its 20-day median
+double   g_riskScale = 1.0;           // 1.0, or InpRegimeRiskFactor in an abnormal regime
+int      hRegimeATR = INVALID_HANDLE;
 
 datetime lastBarTime = 0;
 double prevUp1 = 0.0, prevDn1 = 0.0;
@@ -388,6 +423,8 @@ bool EnsureHandles()
     hTrendEMA = iMA(InpSymbol, InpTrendTF, InpTrendEMALength, 0, MODE_EMA, PRICE_CLOSE);
   if(InpTrailATRTF != PERIOD_CURRENT && InpTrailATRTF != InpTF && hTrailATR == INVALID_HANDLE)
     hTrailATR = iATR(InpSymbol, InpTrailATRTF, InpATRPeriod);
+  if((InpUseContext || InpUseRegimeFilter) && hRegimeATR == INVALID_HANDLE)
+    hRegimeATR = iATR(InpSymbol, PERIOD_D1, InpATRPeriod);
   if(InpEntryMode == ENTRY_SWING_PULLBACK)
   {
     for(int i = 0; i < 3; i++)
@@ -1010,6 +1047,164 @@ bool EquityGuardActive()
   return active;
 }
 
+//---------------- v1.18 market context: movement profile, regime, shocks ----------------
+// Nothing here is hardcoded: the "usual" movement for each weekday and hour is the median of the last
+// InpContextDays of M5 bars, rebuilt daily, and the regime is today's ATR(D1) against its own 20-day median.
+
+// Median M5 range, tick volume and spread for every weekday/hour bucket.
+bool BuildContextProfile()
+{
+  MqlRates r[];
+  int want = InpContextDays * 288 + 288;
+  int got = CopyRates(InpSymbol, PERIOD_M5, 0, want, r);
+  if(got < 576) return false;
+  int cnt[168], off[168], pos[168];
+  ArrayInitialize(cnt, 0);
+  MqlDateTime dt;
+  for(int i = 0; i < got; i++)
+  {
+    TimeToStruct(r[i].time, dt);
+    cnt[dt.day_of_week * 24 + dt.hour]++;
+  }
+  int run = 0;
+  for(int b = 0; b < 168; b++) { off[b] = run; pos[b] = run; run += cnt[b]; }
+  double rr[], vv[], ss[];
+  ArrayResize(rr, got); ArrayResize(vv, got); ArrayResize(ss, got);
+  for(int i = 0; i < got; i++)
+  {
+    TimeToStruct(r[i].time, dt);
+    int p = pos[dt.day_of_week * 24 + dt.hour]++;
+    rr[p] = r[i].high - r[i].low;
+    vv[p] = (double)r[i].tick_volume;
+    ss[p] = (double)r[i].spread;
+  }
+  double seg[];
+  for(int b = 0; b < 168; b++)
+  {
+    int n = cnt[b], wd = b / 24, hr = b % 24;
+    if(n < 5)
+    {
+      g_profRange[wd][hr] = 0.0; g_profVol[wd][hr] = 0.0; g_profSpread[wd][hr] = 0.0;
+      continue;
+    }
+    ArrayResize(seg, n);
+    ArrayCopy(seg, rr, 0, off[b], n); ArraySort(seg); g_profRange[wd][hr]  = (n % 2 == 1 ? seg[n/2] : 0.5 * (seg[n/2-1] + seg[n/2]));
+    ArrayCopy(seg, vv, 0, off[b], n); ArraySort(seg); g_profVol[wd][hr]    = (n % 2 == 1 ? seg[n/2] : 0.5 * (seg[n/2-1] + seg[n/2]));
+    ArrayCopy(seg, ss, 0, off[b], n); ArraySort(seg); g_profSpread[wd][hr] = (n % 2 == 1 ? seg[n/2] : 0.5 * (seg[n/2-1] + seg[n/2]));
+  }
+  g_profReady = true;
+  g_profBuilt = TimeCurrent();
+  return true;
+}
+
+// Today's ATR(D1) (last completed day) divided by the median of the 20 days before it.
+double RegimeRatio()
+{
+  if(hRegimeATR == INVALID_HANDLE) return 0.0;
+  double a[];
+  ArraySetAsSeries(a, true);
+  if(CopyBuffer(hRegimeATR, 0, 1, 21, a) != 21) return 0.0;
+  double m[];
+  ArrayResize(m, 20);
+  for(int i = 0; i < 20; i++) m[i] = a[i + 1];
+  ArraySort(m);
+  double med = 0.5 * (m[9] + m[10]);
+  return (med > 0.0 && a[0] > 0.0 ? a[0] / med : 0.0);
+}
+
+// A closed M5 bar far outside what this hour normally does (or a spread spike) starts a cooldown.
+void ContextShockCheck()
+{
+  if(!g_profReady) return;
+  datetime b = iTime(InpSymbol, PERIOD_M5, 0);
+  if(b == 0 || b == g_lastShockBar) return;
+  g_lastShockBar = b;
+  MqlRates r[];
+  if(CopyRates(InpSymbol, PERIOD_M5, 1, 1, r) != 1) return;
+  MqlDateTime dt;
+  TimeToStruct(r[0].time, dt);
+  double medR = g_profRange[dt.day_of_week][dt.hour];
+  double medV = g_profVol[dt.day_of_week][dt.hour];
+  double medS = g_profSpread[dt.day_of_week][dt.hour];
+  double rng = r[0].high - r[0].low;
+  double spreadNow = (double)SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD);
+  string why = "";
+  if(medR > 0.0 && InpShockRangeMult > 0.0 && rng >= InpShockRangeMult * medR)
+    why = StringFormat("M5 range %.2f = %.1fx the usual %.2f", rng, rng / medR, medR);
+  else if(medV > 0.0 && InpShockVolMult > 0.0 && (double)r[0].tick_volume >= InpShockVolMult * medV)
+    why = StringFormat("M5 ticks %d = %.1fx the usual %.0f", (int)r[0].tick_volume, (double)r[0].tick_volume / medV, medV);
+  else if(medS > 0.0 && InpShockSpreadMult > 0.0 && spreadNow >= InpShockSpreadMult * medS)
+    why = StringFormat("spread %d = %.1fx the usual %.0f", (int)spreadNow, spreadNow / medS, medS);
+  if(why == "") return;
+  datetime until = TimeCurrent() + InpShockCooldownMin * 60;
+  if(until <= g_shockUntil) return;
+  g_shockUntil = until;
+  PrintFormat("Context: shock on the %s M5 bar -- %s; no new entries for %d min",
+              TimeToString(r[0].time, TIME_MINUTES), why, InpShockCooldownMin);
+}
+
+// Called every tick: keeps the profile (daily), the regime ratio (hourly) and the shock state current.
+void ContextMaintain()
+{
+  bool needProfile = (InpUseContext || InpUseShockPause);
+  bool needRegime  = (InpUseContext || InpUseRegimeFilter);
+  if(!needProfile && !needRegime) return;
+  datetime now = TimeCurrent();
+  if(needProfile && (!g_profReady || now - g_profBuilt >= 86400)) BuildContextProfile();
+  if(needRegime)
+  {
+    static datetime lastRegime = 0;
+    if(now - lastRegime >= 3600) { g_regimeRatio = RegimeRatio(); lastRegime = now; }
+  }
+  if(InpUseShockPause) ContextShockCheck();
+}
+
+// The one place both entry paths ask "may we open a trade now, and at what size?".
+bool ContextAllowsEntry(string who)
+{
+  g_riskScale = 1.0;
+  if(InpSkipWeekdays != "")
+  {
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+    if(StringFind(InpSkipWeekdays, IntegerToString(dt.day_of_week)) >= 0)
+    {
+      PrintFormat("%s: skip, weekday %d is in InpSkipWeekdays (%s)", who, dt.day_of_week, InpSkipWeekdays);
+      return false;
+    }
+  }
+  if(InpUseShockPause && g_shockUntil > 0 && TimeCurrent() < g_shockUntil)
+  {
+    PrintFormat("%s: skip, shock cooldown until %s", who, TimeToString(g_shockUntil, TIME_MINUTES));
+    return false;
+  }
+  if(InpUseRegimeFilter && g_regimeRatio > 0.0
+     && (g_regimeRatio < InpRegimeMinRatio || g_regimeRatio > InpRegimeMaxRatio))
+  {
+    string state = (g_regimeRatio < InpRegimeMinRatio ? "compressed" : "expanded");
+    if(InpRegimeRiskFactor <= 0.0)
+    {
+      PrintFormat("%s: skip, %s day (ATR(D1) %.2fx its 20-day median, outside %.2f-%.2f)",
+                  who, state, g_regimeRatio, InpRegimeMinRatio, InpRegimeMaxRatio);
+      return false;
+    }
+    g_riskScale = InpRegimeRiskFactor;
+    static datetime lastScaleLog = 0;   // the gate can be asked many times a day; one line an hour is enough
+    if(TimeCurrent() - lastScaleLog >= 3600)
+    {
+      lastScaleLog = TimeCurrent();
+      PrintFormat("%s: %s day (ATR(D1) %.2fx median) -- risk scaled to %.0f%% of normal",
+                  who, state, g_regimeRatio, g_riskScale * 100.0);
+    }
+  }
+  return true;
+}
+
+double EffectiveRiskPercent()
+{
+  return InpRiskPercent * g_riskScale;
+}
+
 // Same margin / spread / session gates the breakout entries use.
 bool SwingEntryFiltersPass()
 {
@@ -1046,6 +1241,7 @@ bool SwingEntryFiltersPass()
     Print("Swing: skip, outside trade windows");
     return false;
   }
+  if(!ContextAllowsEntry("Swing")) return false;
   return true;
 }
 
@@ -1058,7 +1254,7 @@ double SwingLots(double entry, double sl, ENUM_ORDER_TYPE ot)
     double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
     double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
     double lossPerLot = (risk / tickSize) * tickValue;
-    if(lossPerLot > 0.0) lots = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPercent / 100.0 / lossPerLot;
+    if(lossPerLot > 0.0) lots = AccountInfoDouble(ACCOUNT_EQUITY) * EffectiveRiskPercent() / 100.0 / lossPerLot;
   }
   double step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
   lots = MathFloor(lots / step) * step;
@@ -2063,6 +2259,14 @@ int OnInit()
               (int)InpUseRiskSizing, InpRiskPercent, InpMaxRiskPercent, (int)InpUseEquityGuard, InpEquityGuardPct,
               InpEquityGuardDays, g_eqPeak, (int)InpUseTradeWindows, InpTradeWindows, (int)InpExitAtTP1,
               (int)InpTrailATRTF, (int)InpThrottleClosedMarket);
+  if(InpUseContext || InpUseShockPause || InpUseRegimeFilter)
+  {
+    ContextMaintain();
+    PrintFormat("Init: v1.18 context profile=%d (%d days) regimeRatio=%.2f regimeFilter=%d [%.2f-%.2f, riskFactor %.2f] shockPause=%d [%.1fx range, %.1fx ticks, %.1fx spread, %d min] skipWeekdays=[%s]",
+                (int)g_profReady, InpContextDays, g_regimeRatio, (int)InpUseRegimeFilter, InpRegimeMinRatio,
+                InpRegimeMaxRatio, InpRegimeRiskFactor, (int)InpUseShockPause, InpShockRangeMult, InpShockVolMult,
+                InpShockSpreadMult, InpShockCooldownMin, InpSkipWeekdays);
+  }
   return(INIT_SUCCEEDED);
 }
 
@@ -2077,6 +2281,8 @@ void OnTick()
 
   // v1.17 equity guard, evaluated on every tick so the rolling peak sees every equity value
   bool guardActive = EquityGuardActive();
+  // v1.18 market context: rebuild the movement profile daily, refresh the regime hourly, watch for shocks
+  ContextMaintain();
 
   // gate logic to new bar for signal generation
   bool newBar = IsNewBar();
@@ -2257,6 +2463,14 @@ void OnTick()
     buySignal = false;
     sellSignal = false;
   }
+  // v1.18 market context (weekday skip, shock cooldown, volatility regime) for breakout entries.
+  // New bar and breakout mode only: swing mode asks the same question in SwingEntryFiltersPass(), and the raw
+  // breakout signals above are still computed on every tick even when the entry mode ignores them.
+  if(newBar && InpEntryMode == ENTRY_REGIME_BREAKOUT && (buySignal || sellSignal) && !ContextAllowsEntry("Breakout"))
+  {
+    buySignal = false;
+    sellSignal = false;
+  }
 
   // One position at a time if configured
   double curEntry=0.0, curSL=0.0;
@@ -2340,7 +2554,7 @@ void OnTick()
       if(InpUseRiskSizing && slPrice > 0.0)
       {
         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-        double riskAmt = equity * InpRiskPercent / 100.0;
+        double riskAmt = equity * EffectiveRiskPercent() / 100.0;
         double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
         double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
         double lossPerLot = (riskR / tickSize) * tickValue;
@@ -2404,7 +2618,7 @@ void OnTick()
       if(InpUseRiskSizing && slPrice > 0.0)
       {
         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-        double riskAmt = equity * InpRiskPercent / 100.0;
+        double riskAmt = equity * EffectiveRiskPercent() / 100.0;
         double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
         double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
         double lossPerLot = (riskR / tickSize) * tickValue;

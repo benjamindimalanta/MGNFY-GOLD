@@ -89,6 +89,19 @@ HUD: STATS and RISK CALC tabs, session line (Tokyo/London/NY/overlap/break/weeke
 bias and pending order in swing mode. `OnChartEvent` (tab clicks, calculator edits) does not run in the
 tester.
 
+### v1.18 additions (2026-09-16)
+- **Default change:** `InpTrailATRTF = PERIOD_M30` (the ATR trailing stop uses M30, not the working
+  timeframe). This passed a pre-registered validation run on Mar 2 - May 22.
+- New inputs, all **off by default**, everything measured from history at runtime: `InpUseContext` +
+  `InpContextDays` (median M5 range/ticks/spread per weekday and hour, rebuilt daily),
+  `InpUseRegimeFilter` + `InpRegimeMinRatio`/`InpRegimeMaxRatio`/`InpRegimeRiskFactor` (ATR(D1) vs its
+  20-day median; skip or shrink), `InpUseShockPause` + `InpShockRangeMult`/`InpShockVolMult`/
+  `InpShockSpreadMult`/`InpShockCooldownMin`, `InpSkipWeekdays` (e.g. "5" = Friday, server time).
+- Entry gating for both modes runs through `ContextAllowsEntry()`; risk sizing goes through
+  `EffectiveRiskPercent()` so the regime factor scales the lot.
+- **Runner gotcha:** string inputs must be passed as `EXTRA_INPUTS="InpSkipWeekdays=str:5"`, otherwise
+  the `||start||step||stop||N` suffix becomes part of the string the EA receives.
+
 ### v1.16-v1.17 additions
 - v1.16: `MoveSLto()` selects the EA's own position by magic/ticket (hedging fix);
   `InpBreakoutClosedBar`; `InpSwingEntryStyle` (0 limit, 1 M5 sweep-and-reclaim confirmation) and
@@ -259,7 +272,20 @@ Round 2 (v1.17, 12 wk IS, $5,000/week, 1% risk; JOURNAL "Review round 2"):
 | X2 user's trade windows (06-10, 11-13, 15-17 UTC) | 27 trades, +0.97R; B2 trades outside the windows were +6.57R; rejected |
 | Min lot vs 1.5% cap on small accounts (B2 stops) | $500: 26 of 56 skipped; $1,000: 5; $2,000: 0 |
 
-About 12 ideas have now been tried on the Jun 22 - Sep 11 weeks; they are exhausted for tuning.
+Round 3 (v1.18; JOURNAL "Review round 3"):
+
+| Question | Answer |
+|---|---|
+| M30 ATR trail on the validation weeks (Mar 2 - May 22) | **Passed** its pre-registered criteria: +29.74R vs +17.80R, paired +0.190R (t 1.26, better in 6/12 weeks). Now the default. Mar - May is used data |
+| Is the in-sample period "normal"? | **Every one of the 71 in-sample days is normal** (ATR(D1)/20-day median 0.82-1.18). Validation: 18 compressed / 8 expanded; holdout: 10 / 19 (max 3.32). A regime filter cannot be tested in-sample |
+| Do shocks touch the trades? | M5 range >= 4x its hour's median happens ~8x/day, but only 2-3 of 56 in-sample trades follow one within 30-60 min. Untestable in-sample |
+| X3 no Friday entries | 46 trades +22.00R vs 57 / +18.92R: failed (avg +0.478R < +0.482R required) |
+| X4 no 00:00-06:00 UTC entries | 41 trades +21.43R: failed (total < +21.92R required) |
+| Do the filters' gains mean anything? | No: every surviving trade is identical to the baseline; the gain is only the removal of trades that were negative in those same weeks |
+
+About 14 ideas have now been tried on the Jun 22 - Sep 11 weeks; they are exhausted for tuning.
+Only Jan 5 - Feb 27 is still untouched, and it is the most abnormal stretch of the year (19 of 47
+days expanded), so it suits a context-aware candidate rather than another filter.
 
 Ideas raised but **not yet tested**: a single pre-registered confirmatory run of the looser trail (X1c, or
 X1b) on the unused validation weeks; reduced risk around FOMC/NFP/CPI (needs a schedule file); continuous
