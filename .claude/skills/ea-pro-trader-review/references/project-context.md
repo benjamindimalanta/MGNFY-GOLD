@@ -284,8 +284,20 @@ Round 3 (v1.18; JOURNAL "Review round 3"):
 | Do the filters' gains mean anything? | No: every surviving trade is identical to the baseline; the gain is only the removal of trades that were negative in those same weeks |
 
 About 14 ideas have now been tried on the Jun 22 - Sep 11 weeks; they are exhausted for tuning.
-Only Jan 5 - Feb 27 is still untouched, and it is the most abnormal stretch of the year (19 of 47
-days expanded), so it suits a context-aware candidate rather than another filter.
+
+Round 4 (v1.19; JOURNAL "Review round 4") -- **the holdout has now been used, so no untouched data
+remains anywhere**:
+
+| Question | Answer |
+|---|---|
+| First clean out-of-sample read (v1.18 defaults, Jan 5 - Feb 27, 8 weeks) | **41 trades, +$408.78, PF 1.41, +8.22R (+0.201R/trade), 5/8 weeks positive, worst week -$183.48, worst weekly DD 3.90%** -- positive but a tiny sample |
+| H1: regime filter at half size on abnormal days (the user's chosen holdout candidate) | **Failed** its pre-registered criteria: drawdown 3.90% -> 2.20% (pass) but net $408.78 -> $133.81, only 33% of the profit kept (needed >= 60%) |
+| Why R barely moved in H1 | Arithmetic: halving the lot halves P/L *and* risk, so R is unchanged by construction. The small +0.69R difference is lot rounding -- at 0.033 average lots, 33% partials round to zero, so partial closes fell from 8 to 1 |
+| Friday rule on the holdout (observation, not a test) | Friday trades made **+$173.70** (6 trades, +3.48R); the rule would have removed profit. It ships on by default as the user's stated preference, labelled as such |
+| Expectancy across all periods | in-sample +0.332R, validation +0.302R (old trail) / +0.522R (new), holdout +0.201R per trade |
+
+**There is no clean data left.** Any further claim must come from demo-forward or live-forward
+observation; more tester rounds on these weeks can only produce better-fitted numbers.
 
 Ideas raised but **not yet tested**: a single pre-registered confirmatory run of the looser trail (X1c, or
 X1b) on the unused validation weeks; reduced risk around FOMC/NFP/CPI (needs a schedule file); continuous

@@ -88,9 +88,21 @@
 //|    detector that pauses new entries for a cooldown, and a         |
 //|    weekday skip list.                                             |
 //+------------------------------------------------------------------+
+//| v1.19 (2026-09-16): small-account visibility, review round 4     |
+//|  - Fridays off by default (InpSkipWeekdays="5"). This is the      |
+//|    user's own preference, NOT a validated edge: the in-sample     |
+//|    test failed and was circular, and on the holdout the Friday    |
+//|    trades were profitable.                                        |
+//|  - A setup the risk cap refuses is now explained instead of       |
+//|    silently dropped: the HUD and the log say what was found, the  |
+//|    risk the minimum lot would cost, and the balance it needs.     |
+//|  - The HUD also shows the market state (normal / compressed /     |
+//|    expanded), and whether entries are paused by the equity guard, |
+//|    a shock cooldown or the weekday rule.                          |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.18"
+#property version   "1.19"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -195,7 +207,7 @@ input double   InpShockRangeMult       = 6.0;             // Shock: M5 range >= 
 input double   InpShockVolMult         = 6.0;             // Shock: M5 tick volume >= this x the hour's median
 input double   InpShockSpreadMult      = 2.0;             // Shock: current spread >= this x the hour's median spread
 input int      InpShockCooldownMin     = 30;              // Minutes without new entries after a shock
-input string   InpSkipWeekdays         = "";              // No new entries on these weekdays, server time (0=Sun ... 5=Fri, e.g. "5")
+input string   InpSkipWeekdays         = "5";             // No new entries on these weekdays, server time (0=Sun ... 5=Fri). Default "5" = Fridays off: the user's preference, NOT a tested edge (the in-sample test failed and was circular; on the holdout Fridays made money). Set "" to trade every day
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend
@@ -273,6 +285,13 @@ datetime g_lastShockBar = 0;
 double   g_regimeRatio = 0.0;         // ATR(D1) vs its 20-day median
 double   g_riskScale = 1.0;           // 1.0, or InpRegimeRiskFactor in an abnormal regime
 int      hRegimeATR = INVALID_HANDLE;
+// v1.19: the last setup the risk cap refused, so the HUD and the log can explain the silence
+datetime g_skipTime = 0;
+string   g_skipSide = "";
+double   g_skipPrice = 0.0;
+double   g_skipLots = 0.0;
+double   g_skipRiskPct = 0.0;
+double   g_skipNeedBal = 0.0;
 
 datetime lastBarTime = 0;
 double prevUp1 = 0.0, prevDn1 = 0.0;
@@ -314,7 +333,7 @@ bool     g_calcIsBuy   = true; // risk-calculator direction toggle
 int HUD_PanelX = 10;
 int HUD_PanelY = 75;   // below the terminal's own toolbar
 int HUD_PanelW = 300;
-int HUD_PanelH = 460; // fits the taller Stats tab content plus the session lines, with margin
+int HUD_PanelH = 500; // fits the Stats tab, the session lines and the v1.19 status lines, with margin
 
 string StatsGlobalName()
 {
@@ -936,17 +955,27 @@ bool SymbolTradeSessionOpen()
 // Risk sizing floors the lot to the volume step, so risk never exceeds InpRiskPercent -- except when the result is
 // below the minimum lot and gets raised to it. Then the trade is skipped if that minimum lot risks more than
 // InpMaxRiskPercent of equity.
-bool RiskWithinCap(double lots, double stopDist, string who)
+bool RiskWithinCap(double lots, double stopDist, string who, string side = "", double price = 0.0)
 {
   if(!InpUseRiskSizing || InpMaxRiskPercent <= 0.0 || lots <= 0.0 || stopDist <= 0.0) return true;
   double tickValue = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
   double tickSize  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
   if(tickSize <= 0.0 || equity <= 0.0) return true;
-  double riskPct = lots * (stopDist / tickSize) * tickValue / equity * 100.0;
+  double riskMoney = lots * (stopDist / tickSize) * tickValue;
+  double riskPct = riskMoney / equity * 100.0;
   if(riskPct <= InpMaxRiskPercent) return true;
-  PrintFormat("%s: skip, minimum lot risks %.2f%% of equity > max %.2f%% (stop %.2f, lots %.2f, equity %.2f)",
-              who, riskPct, InpMaxRiskPercent, stopDist, lots, equity);
+  // v1.19: remember and explain the refusal -- on a small account this is the whole story of a quiet robot.
+  g_skipTime = TimeCurrent();
+  g_skipSide = (side == "" ? who : side);
+  g_skipPrice = price;
+  g_skipLots = lots;
+  g_skipRiskPct = riskPct;
+  g_skipNeedBal = riskMoney / (InpMaxRiskPercent / 100.0);
+  PrintFormat("%s: setup skipped -- %s at %s, %.2f lot would risk %.1f%% of $%.2f (cap %.1f%%, stop %.2f); "
+              "this setup needs about $%.0f balance",
+              who, g_skipSide, DoubleToString(price, _Digits), lots, riskPct, equity, InpMaxRiskPercent,
+              stopDist, g_skipNeedBal);
   return false;
 }
 
@@ -1260,7 +1289,7 @@ double SwingLots(double entry, double sl, ENUM_ORDER_TYPE ot)
   lots = MathFloor(lots / step) * step;
   lots = MathMax(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN), MathMin(SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX), lots));
   lots = AdjustLotsByMargin(lots, entry, ot);
-  if(lots > 0.0 && !RiskWithinCap(lots, risk, "Swing")) return 0.0;
+  if(lots > 0.0 && !RiskWithinCap(lots, risk, "Swing", (ot == ORDER_TYPE_BUY ? "BUY" : "SELL"), entry)) return 0.0;
   return lots;
 }
 
@@ -1786,6 +1815,38 @@ double HUD_CalcProfit(bool isBuy, double lots, double openPrice, double closePri
   return profit;
 }
 
+// v1.19: plain-words status for the HUD and the log. On a small account the robot is often idle by
+// design (the risk cap refuses every setup), and a silent panel cannot be told apart from a broken one.
+string ContextStateText()
+{
+  string market = "Market: not measured (context off)";
+  if((InpUseContext || InpUseRegimeFilter) && g_regimeRatio > 0.0)
+  {
+    string st = (g_regimeRatio < InpRegimeMinRatio ? "compressed"
+                 : (g_regimeRatio > InpRegimeMaxRatio ? "expanded" : "normal"));
+    market = StringFormat("Market: %s (ATR D1 %.2fx its 20-day median)", st, g_regimeRatio);
+  }
+  string entries = "Entries: on";
+  if(g_guardActive) entries = "Entries: paused (equity guard)";
+  else if(InpUseShockPause && g_shockUntil > 0 && TimeCurrent() < g_shockUntil)
+    entries = StringFormat("Entries: paused (shock, ~%d min left)", (int)((g_shockUntil - TimeCurrent()) / 60) + 1);
+  else if(InpSkipWeekdays != "")
+  {
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+    if(StringFind(InpSkipWeekdays, IntegerToString(dt.day_of_week)) >= 0) entries = "Entries: off today (weekday rule)";
+  }
+  return market + "   " + entries;
+}
+
+string SkipStateText()
+{
+  if(g_skipTime == 0) return "No setup refused by the risk cap yet";
+  return StringFormat("Skipped %s: %s at %s -- %.2f lot risks %.1f%% (cap %.1f%%); needs ~$%.0f",
+                      TimeToString(g_skipTime, TIME_MINUTES), g_skipSide, DoubleToString(g_skipPrice, _Digits),
+                      g_skipLots, g_skipRiskPct, InpMaxRiskPercent, g_skipNeedBal);
+}
+
 //========================================= EnsureHUD =========================================
 // Builds the static layout once. It used to re-run the whole build on every tick, which reset
 // every value label to "" (MT5 renders an empty label as the placeholder "Label") and re-applied
@@ -1840,7 +1901,9 @@ void EnsureHUD()
 
   HUD_Label(HUD_PREFIX + "S_SYS_HDR", innerX, y, "SYSTEM", HUD_HEADER, 9, true); y += 16;
   HUD_Label(HUD_PREFIX + "S_SYS1", innerX, y, "", HUD_SUBTEXT, 9, false); y += 14;
-  HUD_Label(HUD_PREFIX + "S_SYS2", innerX, y, "", HUD_SUBTEXT, 9, false); y += 16;
+  HUD_Label(HUD_PREFIX + "S_SYS2", innerX, y, "", HUD_SUBTEXT, 9, false); y += 14;
+  HUD_Label(HUD_PREFIX + "S_SYS3", innerX, y, "", HUD_TEXT, 9, false); y += 14;    // market state / why entries are off
+  HUD_Label(HUD_PREFIX + "S_SYS4", innerX, y, "", HUD_TEXT, 9, false); y += 16;    // last setup refused by the risk cap
 
   //---------------- RISK CALCULATOR TAB ----------------
   y = contentTop;
@@ -2086,6 +2149,9 @@ void UpdateStatsTab()
   long leverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
   ObjectSetString(0, HUD_PREFIX + "S_SYS1", OBJPROP_TEXT, StringFormat("Spread: %d pts   Lot: %.2f", spread, InpLots));
   ObjectSetString(0, HUD_PREFIX + "S_SYS2", OBJPROP_TEXT, StringFormat("Leverage: 1:%d   Risk: %s", (int)leverage, GetRiskLevel()));
+  ObjectSetString(0, HUD_PREFIX + "S_SYS3", OBJPROP_TEXT, ContextStateText());
+  ObjectSetString(0, HUD_PREFIX + "S_SYS4", OBJPROP_TEXT, SkipStateText());
+  ObjectSetInteger(0, HUD_PREFIX + "S_SYS4", OBJPROP_COLOR, (long)(g_skipTime == 0 ? HUD_SUBTEXT : HUD_HEADER));
 }
 
 void UpdateCalcTab()
@@ -2579,7 +2645,7 @@ void OnTick()
       {
         Print("Skip BUY: not enough margin for min lot after adjustment.");
       }
-      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout BUY"))
+      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout", "BUY", entry))
       {
         // logged by RiskWithinCap
       }
@@ -2643,7 +2709,7 @@ void OnTick()
       {
         Print("Skip SELL: not enough margin for min lot after adjustment.");
       }
-      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout SELL"))
+      else if(slPrice > 0.0 && !RiskWithinCap(lots, riskR, "Breakout", "SELL", entry))
       {
         // logged by RiskWithinCap
       }

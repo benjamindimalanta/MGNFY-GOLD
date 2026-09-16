@@ -1159,3 +1159,90 @@ used 0.01 lot, the real risk per trade would be **3.4% to 17.2% of equity** (med
 preset, it is 1% risk in name only, so the cap stays and the answer is the balance, not the input:
 **fund the demo with $2,000 to see the tested behaviour** (or $1,000 and accept ~9% of setups
 skipped). This is also the honest precondition for going live later.
+
+
+---
+
+## 2026-09-16 -- Review round 4: the holdout
+
+**User's answers:** demo stays at **$100** (they accept it will sit idle -- so the EA must *show* why
+it is idle); the equity-guard reading stays an unconfirmed assumption; the holdout candidate is the
+**regime filter in risk-shrink mode**; **Fridays off by default** as their own preference, knowing the
+test failed and was circular; shock detector and HUD context display stay open questions.
+
+### Experiment H1 -- regime risk-shrink on the holdout (pre-registered 2026-09-16, before the run)
+- **Weeks:** Jan 5 - Feb 27, 2026, the last untouched data -- 8 full weeks (Mondays Jan 5, 12, 19, 26,
+  Feb 2, 9, 16, 23). The most abnormal stretch of the year: 10 compressed and 19 expanded days of 47,
+  ATR(D1) ratio 0.44 to 3.32.
+- **Runs:** both at $5,000 per week, 1% risk, real ticks, v1.18 defaults, confirmation entry.
+  - Baseline: `EXTRA_INPUTS="InpUseRiskSizing=true"`.
+  - Candidate: `+ "InpUseRegimeFilter=true;InpRegimeRiskFactor=0.5"` -- band left at the input
+    defaults **0.80 - 1.30**, factor **0.5**, both fixed before seeing any holdout result.
+  - **The Friday skip is off in both runs** so the comparison isolates the regime filter. What the
+    Friday rule would have done on these weeks is reported separately as an observation, not a test.
+- **What this can and cannot show:** halving the lot halves profit *and* risk, so **R per trade is
+  unchanged by construction**. This tests a risk control, not an edge: the question is whether cutting
+  size on abnormal days gives up little profit for a real cut in drawdown. R is reported only as a
+  check that the filter changed size rather than trade selection.
+- **Primary metrics:** net $ and worst weekly drawdown %.
+- **Pass criteria:**
+  - worst weekly drawdown <= **0.80 x** the baseline's, **and**
+  - if the baseline's net $ is positive, candidate net $ >= **0.60 x** baseline net $; if the
+    baseline's net $ is negative, candidate net $ **better (less negative)** than the baseline's, **and**
+  - trade count within **+/-10%** of the baseline's and total R within +/-1.0R (evidence that it
+    resized rather than re-selected).
+- **Falsified if:** drawdown is not reduced, or net $ falls below 60% of a positive baseline.
+- **The separate, bigger question this run answers:** the baseline is the **first out-of-sample read
+  of the v1.18 defaults**. Its trades, R, net $ and weekly spread are reported as the project's honest
+  out-of-sample result, whatever they say.
+- **After this run no untouched data remains.** Any further judgement has to come from demo-forward or
+  live-forward observation, not from more tester rounds on these same weeks.
+
+### H1 result -- regime risk-shrink on the holdout: FAILED its criteria
+Both runs: 8 weeks, 8 ticks lines each, the intended inputs in every tester log
+(`InpUseRegimeFilter=true InpRegimeRiskFactor=0.5` in all 8 candidate runs, `InpSkipWeekdays=` empty
+in both).
+
+| Jan 5 - Feb 27 (holdout) | Trades | Win% | Net $ | PF ($) | Total R | Avg R | Weeks + | Worst week DD | Avg lot | Partial closes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| v1.18 defaults (baseline) | 41 | 36.6 | **+408.78** | 1.41 | +8.22 | +0.201 | 5/8 | **3.90%** | 0.047 | 8 |
+| + regime 0.5x on abnormal days | 41 | 36.6 | **+133.81** | 1.19 | +8.91 | +0.217 | 5/8 | **2.20%** | 0.033 | 1 |
+
+Criteria: worst weekly DD <= 3.12% ✓ (2.20%); net $ >= 0.60 x 408.78 = $245.27 **✗ (+$133.81, only
+33%)**; same trades ✓ (41 vs 41, total R +8.91 vs +8.22, all 41 paired). **Failed on net $.**
+
+Reading: it did exactly what it was built to do -- drawdown fell 44% -- but on these weeks **the
+abnormal days were where the profit was**, so halving size there cost 67% of the profit to buy that
+protection. Weekly: Jan 5 +$145.89 -> +$0.22, Feb 16 +$242.13 -> +$119.05, and the worst week improved
+from -$183.48 to -$83.00.
+
+Two honest notes:
+1. **R is unchanged by construction** (halving the lot halves P/L and risk alike), so the small R
+   difference (+8.22 -> +8.91) is not an edge: it comes from lot rounding. At half size the average
+   lot fell to 0.033, and 33% of that rounds to 0.00, so **partial closes at TP1/TP2 collapsed from 8
+   to 1** -- trades ran to their full exit instead of banking part. That is a real side effect of
+   shrink mode on a small account, worth knowing.
+2. The candidate is judged on money and drawdown only, exactly as pre-registered.
+
+### The holdout's bigger answer -- first clean out-of-sample read of the v1.18 defaults
+**41 trades, +$408.78, PF 1.41, +8.22R (+0.201R per trade), 5 of 8 weeks positive, worst week
+-$183.48 (-4.09R), worst weekly drawdown 3.90%.** Weekly net $: +145.89, -30.91, +66.46, -56.78,
++187.23, +38.24, +242.13, -183.48.
+
+This is the first time the strategy has been measured on data never used for any decision, and it is
+positive. It is **not** proof: 41 trades over 8 weeks, one regime (an unusually volatile stretch), and
+the project has tried ~14 ideas to get here. Compare with the tuning periods: in-sample +0.332R per
+trade, validation +0.302R (old trail) / +0.522R (new), holdout +0.201R -- the ranking is consistent
+and the size is small, which is what an honest, weak-but-real result looks like.
+
+### Friday on the holdout -- observation, not a test
+The user asked for Fridays off as a personal rule. On the holdout weeks that rule would have **cost**
+money: 6 Friday trades made **+$173.70 (+3.48R)**; without them the baseline falls from +$408.78 to
++$235.08. Combined with the failed, circular in-sample test, the record is: no data supports the
+Friday rule, and the only clean data argues against it. It ships on by default because the user asked
+for it, clearly labelled as a preference.
+
+### After this round
+**No untouched data remains.** In-sample, validation and holdout have all been used. Any further
+claim about this EA has to come from demo-forward or live-forward observation. More tester rounds on
+these weeks can only produce better-fitted numbers, not better evidence.

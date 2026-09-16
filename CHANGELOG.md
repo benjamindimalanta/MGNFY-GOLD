@@ -2,6 +2,33 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.19] - 2026-09-16
+Small-account visibility and the user's Friday rule, review round 4
+(`reviews/2026-09-16-pro-trader-review-round4.md`). No change to how trades are selected or sized.
+
+- **`InpSkipWeekdays` now defaults to "5" (no new entries on Fridays).** This is the **user's own
+  preference, not a validated edge**: the in-sample test failed (avg +0.478R against the +0.482R
+  required) and was circular anyway (every surviving trade was identical, so the "gain" was only the
+  removal of trades that had lost in those same weeks), and on the holdout the Friday trades **made**
+  money (+$173.70 over 6 trades). Set it to "" to trade every day. Verified: on two in-sample weeks
+  it removes exactly the Friday entries and leaves every other trade identical.
+- **A setup refused by the risk cap is now explained instead of silently dropped.** The log prints one
+  line per refusal -- what was found, the risk the minimum lot would cost, and the balance the setup
+  needs: `Swing: setup skipped -- SELL at 3993.112, 0.01 lot would risk 17.2% of $100.00 (cap 1.5%,
+  stop 17.23); this setup needs about $1149 balance`. Verified on a $100 tester week: 0 trades, 4
+  explanatory lines, balances needed $530-$1,149.
+- **The HUD's SYSTEM block gained two lines** (panel 460 -> 500 px): the market state (normal /
+  compressed / expanded with the ATR(D1) ratio) together with why entries are off (equity guard,
+  shock cooldown or the weekday rule), and the last setup the cap refused. Built once and updated in
+  place, as the rest of the HUD is.
+- Holdout result (the last untouched data, Jan 5 - Feb 27, $5,000 weeks, 1% risk): **v1.18/v1.19
+  defaults made 41 trades, +$408.78, PF 1.41, +8.22R, 5 of 8 weeks positive, worst weekly drawdown
+  3.90%** -- the first out-of-sample read of this strategy, positive but on a small sample. The
+  user's chosen candidate, the regime filter at half size on abnormal days, **failed** its
+  pre-registered criteria: drawdown fell to 2.20% but net dropped to $133.81 (33% of the baseline,
+  where 60% was required), because on those weeks the abnormal days were where the profit was. It
+  stays off by default.
+
 ## [1.18] - 2026-09-16
 Market context, review round 3 (`reviews/2026-09-16-pro-trader-review-round3.md`).
 
