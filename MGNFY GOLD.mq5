@@ -100,9 +100,20 @@
 //|    expanded), and whether entries are paused by the equity guard, |
 //|    a shock cooldown or the weekday rule.                          |
 //+------------------------------------------------------------------+
+//| v1.20 (2026-09-17): the user's answers after round 4              |
+//|  - Fridays are traded again (InpSkipWeekdays=""). The holdout's    |
+//|    six Friday trades made +$173.70, about 42% of the holdout       |
+//|    profit, and the in-sample test that suggested skipping them     |
+//|    failed and was circular. The user chose the evidence.           |
+//|  - Equity guard confirmed by the user: pause new entries while     |
+//|    equity is 10% or more below its highest value of the last 7     |
+//|    days. It is no longer an assumption.                            |
+//|  - The shock pause stays off, so forward demo results stay         |
+//|    comparable with the tested build.                               |
+//+------------------------------------------------------------------+
 #property copyright "Visit product page"
 #property link      "https://www.mql5.com/en/market/product/154202"
-#property version   "1.19"
+#property version   "1.20"
 #property description "ATR Regime Breakouts with EMA midline and ATR bands. Tabbed HUD: live stats + risk calculator."
 #property description "Entries: regime flip or breakout with 1–2 bar confirmation."
 #property description "Risk: ATR-based SL/TP (1R/2R/3R), partial exits, stairstep lock at TP1/TP2."
@@ -188,7 +199,7 @@ input double   InpSwingSweepMaxATR     = 1.0;             // Swing confirm entry
 // v1.17: exits, equity guard, trade windows, stop modifications while the market is closed
 input ENUM_TP1_EXIT InpExitAtTP1       = EXIT_STOP_TO_TP1; // What the stop does when TP1 / TP2 are reached (with InpMoveToBEafterTP1)
 input ENUM_TIMEFRAMES InpTrailATRTF    = PERIOD_M30;      // ATR trailing timeframe (v1.18 default M30: passed validation; PERIOD_CURRENT = InpTF)
-input bool     InpUseEquityGuard       = true;            // Pause new entries while equity is InpEquityGuardPct or more below its rolling peak
+input bool     InpUseEquityGuard       = true;            // Pause new entries while equity is InpEquityGuardPct or more below its rolling peak (the user's confirmed "moving 10% weekly" rule, 2026-09-17)
 input double   InpEquityGuardPct       = 10.0;            // Equity guard: drawdown from the rolling peak that pauses new entries (%)
 input int      InpEquityGuardDays      = 7;               // Equity guard: rolling window for the peak (days)
 input bool     InpUseTradeWindows      = false;           // Only enter inside InpTradeWindows (server time); pending orders cancelled outside them
@@ -207,7 +218,7 @@ input double   InpShockRangeMult       = 6.0;             // Shock: M5 range >= 
 input double   InpShockVolMult         = 6.0;             // Shock: M5 tick volume >= this x the hour's median
 input double   InpShockSpreadMult      = 2.0;             // Shock: current spread >= this x the hour's median spread
 input int      InpShockCooldownMin     = 30;              // Minutes without new entries after a shock
-input string   InpSkipWeekdays         = "5";             // No new entries on these weekdays, server time (0=Sun ... 5=Fri). Default "5" = Fridays off: the user's preference, NOT a tested edge (the in-sample test failed and was circular; on the holdout Fridays made money). Set "" to trade every day
+input string   InpSkipWeekdays         = "";              // No new entries on these weekdays, server time (0=Sun ... 5=Fri). Default "" = trade every day: the user kept Fridays after seeing the holdout's Friday trades make +$173.70 (the in-sample skip test failed and was circular). Set "5" to turn Fridays off
 
 // Trend/time filters
 input bool     InpUseTrendFilter       = true;            // Trade only with higher-timeframe EMA trend

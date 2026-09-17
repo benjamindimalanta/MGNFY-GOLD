@@ -2,6 +2,21 @@
 
 All notable changes to MGNFY GOLD will be logged here from now on.
 
+## [1.20] - 2026-09-17
+The user's decisions after reading the round-4 report. No change to entries, sizing or exits.
+
+- **`InpSkipWeekdays` back to "" (Fridays are traded again).** Shown the holdout evidence -- the six
+  Friday trades made +$173.70, about 42% of the holdout's +$408.78, and the in-sample skip test had
+  failed and was circular -- the user chose the evidence over the preference. Set it to "5" to turn
+  Fridays off again.
+- **The equity guard is confirmed, not assumed.** The user's "10% per week (moving)" rule means:
+  pause new entries while equity is 10% or more below its highest value of the last 7 days, and
+  resume once back inside or when that peak ages out. That is what `InpUseEquityGuard` /
+  `InpEquityGuardPct=10` / `InpEquityGuardDays=7` already did; the wording is now recorded in the
+  source and here. It has still never fired in any test.
+- **The shock pause stays off** during forward observation, so demo results stay comparable with the
+  tested build.
+
 ## [1.19] - 2026-09-16
 Small-account visibility and the user's Friday rule, review round 4
 (`reviews/2026-09-16-pro-trader-review-round4.md`). No change to how trades are selected or sized.

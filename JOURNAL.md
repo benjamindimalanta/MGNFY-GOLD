@@ -1246,3 +1246,25 @@ for it, clearly labelled as a preference.
 **No untouched data remains.** In-sample, validation and holdout have all been used. Any further
 claim about this EA has to come from demo-forward or live-forward observation. More tester rounds on
 these weeks can only produce better-fitted numbers, not better evidence.
+
+## 2026-09-17 -- the user's decisions after reading round 4 (v1.20)
+
+No experiment, no tester batch: three settings decided by the user once the round-4 evidence was in
+front of them.
+
+1. **Fridays are traded again** (`InpSkipWeekdays=""`). Shown that the holdout's 6 Friday trades made
+   +$173.70 -- about 42% of the holdout's +$408.78 -- and that the in-sample skip test had failed by
+   0.004R and was circular, the user dropped their own preference in favour of the evidence. This is
+   worth recording as a decision *against* a rule the user had asked for a day earlier: the only
+   clean data we have argues for trading Fridays.
+2. **The equity guard is confirmed**, not assumed: pause new entries while equity is 10% or more
+   below its highest value of the last 7 days, resume once back inside or when that peak ages out.
+   That is what the code already did (`InpEquityGuardPct=10`, `InpEquityGuardDays=7`); it is no
+   longer flagged as an interpretation. It has still never fired in any test.
+3. **The shock pause stays off** for forward observation, so demo results remain comparable with the
+   build that produced the holdout numbers.
+
+Compiled v1.20 from the committed source: 0 errors, 0 warnings. The only behavioural difference from
+v1.19 is that Friday entries are allowed again, so the holdout figure (+$408.78, 41 trades, PF 1.41)
+is the number that describes the current defaults -- v1.19's Friday rule would have reduced it to
++$235.08.
