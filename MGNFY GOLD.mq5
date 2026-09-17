@@ -207,7 +207,7 @@ input string   InpTradeWindows         = "06:00-10:00,11:00-13:00,15:00-17:00"; 
 input bool     InpThrottleClosedMarket = true;            // Don't send stop modifications while the symbol's trade session is closed
 
 // v1.18: market context. All off by default; every number is measured from recent history at runtime.
-input bool     InpUseContext           = false;           // Build the movement profile (median M5 range/ticks/spread per weekday and hour)
+input bool     InpUseContext           = true;            // Build the movement profile (median M5 range/ticks/spread per weekday and hour). v1.20 default on: measurement only, so the HUD can show the market state. Verified not to change trading (Aug 10 week, 6 identical trades, +$55.74 with it off and on); the filters that DO change trading (InpUseRegimeFilter, InpUseShockPause) stay off
 input int      InpContextDays          = 30;              // Days of M5 history used for the profile
 input bool     InpUseRegimeFilter      = false;           // React when the day's ATR(D1) is far from its 20-day median
 input double   InpRegimeMinRatio       = 0.80;            // Below this the day is "compressed"
@@ -1830,22 +1830,24 @@ double HUD_CalcProfit(bool isBuy, double lots, double openPrice, double closePri
 // design (the risk cap refuses every setup), and a silent panel cannot be told apart from a broken one.
 string ContextStateText()
 {
-  string market = "Market: not measured (context off)";
+  // v1.20: both halves are kept short. At 9 pt roughly 55 characters fit the 300 px panel, and a
+  // sentence cut off mid-word reads as a broken HUD rather than as information.
+  string market = "Market: not measured";
   if((InpUseContext || InpUseRegimeFilter) && g_regimeRatio > 0.0)
   {
     string st = (g_regimeRatio < InpRegimeMinRatio ? "compressed"
                  : (g_regimeRatio > InpRegimeMaxRatio ? "expanded" : "normal"));
-    market = StringFormat("Market: %s (ATR D1 %.2fx its 20-day median)", st, g_regimeRatio);
+    market = StringFormat("Market: %s %.2fx", st, g_regimeRatio);
   }
   string entries = "Entries: on";
-  if(g_guardActive) entries = "Entries: paused (equity guard)";
+  if(g_guardActive) entries = "Entries: off (equity guard)";
   else if(InpUseShockPause && g_shockUntil > 0 && TimeCurrent() < g_shockUntil)
-    entries = StringFormat("Entries: paused (shock, ~%d min left)", (int)((g_shockUntil - TimeCurrent()) / 60) + 1);
+    entries = StringFormat("Entries: off (shock, %d min)", (int)((g_shockUntil - TimeCurrent()) / 60) + 1);
   else if(InpSkipWeekdays != "")
   {
     MqlDateTime dt;
     TimeToStruct(TimeCurrent(), dt);
-    if(StringFind(InpSkipWeekdays, IntegerToString(dt.day_of_week)) >= 0) entries = "Entries: off today (weekday rule)";
+    if(StringFind(InpSkipWeekdays, IntegerToString(dt.day_of_week)) >= 0) entries = "Entries: off (weekday rule)";
   }
   return market + "   " + entries;
 }
@@ -1853,9 +1855,12 @@ string ContextStateText()
 string SkipStateText()
 {
   if(g_skipTime == 0) return "No setup refused by the risk cap yet";
-  return StringFormat("Skipped %s: %s at %s -- %.2f lot risks %.1f%% (cap %.1f%%); needs ~$%.0f",
-                      TimeToString(g_skipTime, TIME_MINUTES), g_skipSide, DoubleToString(g_skipPrice, _Digits),
-                      g_skipLots, g_skipRiskPct, InpMaxRiskPercent, g_skipNeedBal);
+  // v1.20: kept short on purpose. The long form overflowed the 300 px panel and was cut off
+  // mid-sentence ("... (cap 1.5"), which is worse than no line at all. The full sentence, with the
+  // cap and the stop distance, is printed to the Experts log on every refusal.
+  return StringFormat("Skipped %s %s %s: risk %.1f%%, needs ~$%.0f",
+                      TimeToString(g_skipTime, TIME_MINUTES), g_skipSide, DoubleToString(g_skipPrice, 2),
+                      g_skipRiskPct, g_skipNeedBal);
 }
 
 //========================================= EnsureHUD =========================================

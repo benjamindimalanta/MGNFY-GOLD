@@ -16,6 +16,21 @@ The user's decisions after reading the round-4 report. No change to entries, siz
   source and here. It has still never fired in any test.
 - **The shock pause stays off** during forward observation, so demo results stay comparable with the
   tested build.
+- **Two HUD status lines were overflowing the 300 px panel and were cut off mid-sentence** -- the
+  round-4 report flagged that they had been verified by log and code path, not visually. A $100
+  visual run showed `... 0.01 lot risks 7.2% (cap 1.5` with the rest missing. Both lines are now
+  short enough to fit at 9 pt (`Skipped 06:05 SELL 4402.99: risk 4.7%, needs ~$310`,
+  `Market: normal 1.03x   Entries: on`); the full sentence, with the cap and the stop distance, is
+  still printed to the Experts log on every refusal (410 such lines in a $100 week).
+- **`InpUseContext` now defaults to true (measurement only).** Without it the HUD could only say
+  "Market: not measured", which is useless for the thing the user asked for -- knowing whether the
+  week is normal. Verified it does not touch trading: the Aug 10 week produced 6 identical trades
+  with identical entry times and +$55.74 either way. The features that *do* change trading
+  (`InpUseRegimeFilter`, `InpUseShockPause`) remain off.
+- Verified visually this time: HUD screenshot from a $100 visual run, `ini_runs/hudcheck_v120_100usd.ini`.
+  Note for future configs: MT5 fills inputs **absent from a .ini with the tester's last used values**,
+  not with the EA's defaults -- the first check silently ran in breakout mode until `InpEntryMode` was
+  stated explicitly.
 
 ## [1.19] - 2026-09-16
 Small-account visibility and the user's Friday rule, review round 4

@@ -1268,3 +1268,24 @@ Compiled v1.20 from the committed source: 0 errors, 0 warnings. The only behavio
 v1.19 is that Friday entries are allowed again, so the holdout figure (+$408.78, 41 trades, PF 1.41)
 is the number that describes the current defaults -- v1.19's Friday rule would have reduced it to
 +$235.08.
+
+### HUD verified visually, and two defects it exposed
+Round 4 shipped the new status lines verified by log and code path only. A $100 visual run
+(`ini_runs/hudcheck_v120_100usd.ini`, screenshot `hud_v120_*.png`) showed:
+
+1. **Both new lines overflowed the 300 px panel.** The refusal line rendered as
+   `Skipped 01:00: SELL at 4364.665 -- 0.01 lot risks 7.2% (cap 1.5` and stopped mid-word. Shortened
+   to `Skipped 06:05 SELL 4402.99: risk 4.7%, needs ~$310`; the market/entries line got the same
+   treatment. The full sentence stays in the Experts log (410 refusals logged in one $100 week).
+2. **`Market: not measured (context off)`** -- the market-state display depended on a measuring
+   engine that shipped off, so the line could never say anything. `InpUseContext` now defaults on
+   (measurement only). Checked, not assumed: the Aug 10 week gave 6 trades with identical entry
+   times and +$55.74 with it off and on, so trade selection is untouched.
+
+Also learned, and worth remembering for every future tester config: **MT5 fills inputs that a .ini
+does not list with the tester's last used values, not with the EA's defaults.** The first HUD check
+ran in breakout mode without saying so; `InpEntryMode` and `InpSwingEntryStyle` are now stated
+explicitly in that config.
+
+The first capture was also taken after the run had finished, when the EA had already removed its
+objects at deinit, so the panel was absent -- visual checks must screenshot while the run is live.
